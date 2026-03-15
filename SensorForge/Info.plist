@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>SensorForge</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>arkit</string>
+	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>SensorForge records video and LiDAR depth for robotics datasets. Camera data is saved locally and only shared when you choose to export.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>SensorForge records spatial audio synchronized with other sensors. Audio is saved locally and only shared when you choose to export.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>SensorForge logs GPS coordinates with your sensor recordings for navigation and mapping datasets.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>SensorForge logs GPS coordinates during background recording sessions.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>SensorForge connects to external devices (robots, drones, RC cars) via Bluetooth to log their telemetry alongside phone sensors.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>SensorForge connects to BLE devices to capture synchronized telemetry data.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>SensorForge records accelerometer, gyroscope, and magnetometer data for robotics datasets.</string>
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+	</dict>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+</dict>
+</plist>
