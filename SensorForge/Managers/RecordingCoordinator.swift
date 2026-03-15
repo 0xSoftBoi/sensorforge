@@ -104,6 +104,9 @@ final class RecordingCoordinator: ObservableObject {
         var sessions = SessionStore.shared.loadSessions()
         sessions.insert(session, at: 0)
         SessionStore.shared.saveSessions(sessions)
+
+        // Reset shared clock so next session gets a fresh anchor
+        TimestampProvider.shared.reset()
     }
 
     func requestPermissions() {

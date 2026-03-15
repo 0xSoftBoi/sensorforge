@@ -200,6 +200,7 @@ struct RecordingView: View {
             List {
                 ForEach(CountdownTimer.presets, id: \.self) { seconds in
                     Button {
+                        selectedCountdown = seconds
                         showCountdownPicker = false
                         countdownTimer.start(seconds: seconds)
                     } label: {

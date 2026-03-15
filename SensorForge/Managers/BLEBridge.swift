@@ -31,7 +31,7 @@ final class BLEBridge: NSObject, ObservableObject {
     func start(dataStore: SensorDataStore) {
         self.dataStore = dataStore
         if centralManager == nil {
-            centralManager = CBCentralManager(delegate: self, queue: nil)
+            centralManager = CBCentralManager(delegate: self, queue: .main)
         }
     }
 
