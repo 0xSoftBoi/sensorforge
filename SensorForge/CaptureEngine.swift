@@ -4,13 +4,14 @@ import AVFoundation
 import CoreMotion
 import CoreLocation
 import Combine
+import os
 
 /// Records all iPhone sensors simultaneously, synchronized via SyncClock.
 /// Outputs: video.mp4, audio.wav, imu.csv, gps.csv, magnetometer.csv,
 /// barometer.csv, poses.csv, surfaces.jsonl, depth/*.bin, session.json
 final class CaptureEngine: NSObject, ObservableObject {
 
-    // MARK: - Published State
+    // MARK: - Published State (main thread only)
 
     @Published var isRecording = false
     @Published var recordingDuration: TimeInterval = 0
@@ -22,15 +23,31 @@ final class CaptureEngine: NSObject, ObservableObject {
     @Published var baroActive = false
     @Published var audioActive = false
 
+    // MARK: - Thread-Safe Recording Flag
+
+    /// Atomic flag checked by sensor callbacks from any thread.
+    /// Use this instead of @Published isRecording in callbacks.
+    private let _recording = OSAllocatedUnfairLock(initialState: false)
+
+    private var recording: Bool {
+        get { _recording.withLock { $0 } }
+        set {
+            _recording.withLock { $0 = newValue }
+            DispatchQueue.main.async { self.isRecording = newValue }
+        }
+    }
+
     // MARK: - Sensor Managers
 
     private let motionManager = CMMotionManager()
     private let altimeter = CMAltimeter()
     private let locationManager = CLLocationManager()
+    private var locationAuthorized = false
 
     private var arSession: ARSession?
     private var audioEngine: AVAudioEngine?
     private var audioFile: AVAudioFile?
+    private let audioLock = NSLock()
 
     // MARK: - Video Writer
 
@@ -52,7 +69,7 @@ final class CaptureEngine: NSObject, ObservableObject {
 
     private var sessionDir: URL?
     private var depthDir: URL?
-    private var depthFrameIndex: Int = 0
+    private var depthFrameIndex: Int32 = 0
     private var clock: SyncClock!
     private var durationTimer: Timer?
     private var bleBridge: BLEBridge?
@@ -78,11 +95,11 @@ final class CaptureEngine: NSObject, ObservableObject {
     // MARK: - Start Recording
 
     func startRecording() {
-        guard !isRecording else { return }
+        guard !recording else { return }
 
         clock = SyncClock.newSession()
         frameCount = 0
-        depthFrameIndex = 0
+        OSAtomicCompareAndSwap32(depthFrameIndex, 0, &depthFrameIndex)
         storageUsedMB = 0
         recordingDuration = 0
         videoStartTime = nil
@@ -117,7 +134,8 @@ final class CaptureEngine: NSObject, ObservableObject {
         startBarometer()
         startAudio(in: dir)
 
-        isRecording = true
+        // Set recording flag AFTER all sensors are started
+        recording = true
 
         // Duration timer
         durationTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -130,12 +148,14 @@ final class CaptureEngine: NSObject, ObservableObject {
     // MARK: - Stop Recording
 
     func stopRecording() {
-        guard isRecording else { return }
-        isRecording = false
+        guard recording else { return }
+
+        // 1. Stop accepting new sensor data FIRST
+        recording = false
         durationTimer?.invalidate()
         durationTimer = nil
 
-        // Stop sensors
+        // 2. Stop sensors so no new callbacks fire
         arSession?.pause()
         arSession = nil
         motionManager.stopDeviceMotionUpdates()
@@ -143,30 +163,46 @@ final class CaptureEngine: NSObject, ObservableObject {
         locationManager.stopUpdatingLocation()
         altimeter.stopRelativeAltitudeUpdates()
 
-        // Stop audio
-        audioEngine?.stop()
-        audioEngine?.inputNode.removeTap(onBus: 0)
-        audioEngine = nil
-        audioFile = nil
-
-        // Finalize video
-        videoInput?.markAsFinished()
-        assetWriter?.finishWriting { [weak self] in
-            if let error = self?.assetWriter?.error {
-                print("AssetWriter error: \(error)")
-            }
+        // 3. Stop audio engine and remove tap BEFORE nilling the file
+        if let engine = audioEngine {
+            engine.stop()
+            engine.inputNode.removeTap(onBus: 0)
         }
+        audioEngine = nil
+        audioLock.lock()
+        audioFile = nil
+        audioLock.unlock()
 
-        // Close file handles
+        // 4. Finalize video writer — wait for completion
+        if let writer = assetWriter, writer.status == .writing {
+            videoInput?.markAsFinished()
+            let semaphore = DispatchSemaphore(value: 0)
+            writer.finishWriting {
+                if let error = writer.error {
+                    print("AssetWriter error: \(error)")
+                }
+                semaphore.signal()
+            }
+            // Wait up to 5 seconds for writer to finish
+            _ = semaphore.wait(timeout: .now() + 5)
+        }
+        assetWriter = nil
+        videoInput = nil
+        pixelBufferAdaptor = nil
+
+        // 5. Drain the write queue before closing handles
+        writeQueue.sync {}
+
+        // 6. Close file handles
         closeAllHandles()
 
-        // Write session metadata
+        // 7. Write session metadata
         writeSessionMetadata()
 
-        // Stop BLE logging
+        // 8. Stop BLE logging
         bleBridge?.stopLogging()
 
-        // Reset published state
+        // 9. Reset published state
         DispatchQueue.main.async {
             self.imuActive = false
             self.gpsActive = false
@@ -206,7 +242,7 @@ final class CaptureEngine: NSObject, ObservableObject {
         // Device motion at 100Hz (accel + gyro + gravity + attitude)
         motionManager.deviceMotionUpdateInterval = 1.0 / 100.0
         motionManager.startDeviceMotionUpdates(using: .xArbitraryCorrectedZVertical, to: imuQueue) { [weak self] motion, error in
-            guard let self, let motion, self.isRecording else { return }
+            guard let self, let motion, self.recording else { return }
             let t = self.clock.nanosFromBootTime(motion.timestamp)
             let a = motion.userAcceleration
             let g = motion.gravity
@@ -221,7 +257,7 @@ final class CaptureEngine: NSObject, ObservableObject {
         if motionManager.isMagnetometerAvailable {
             motionManager.magnetometerUpdateInterval = 1.0 / 50.0
             motionManager.startMagnetometerUpdates(to: imuQueue) { [weak self] data, error in
-                guard let self, let data, self.isRecording else { return }
+                guard let self, let data, self.recording else { return }
                 let t = self.clock.nanosFromBootTime(data.timestamp)
                 let f = data.magneticField
                 let line = "\(t),\(f.x),\(f.y),\(f.z)\n"
@@ -234,8 +270,18 @@ final class CaptureEngine: NSObject, ObservableObject {
 
     private func startGPS() {
         locationManager.desiredAccuracy = kCLLocationAccuracyBest
-        locationManager.requestWhenInUseAuthorization()
-        locationManager.startUpdatingLocation()
+
+        let status = locationManager.authorizationStatus
+        switch status {
+        case .authorizedWhenInUse, .authorizedAlways:
+            locationAuthorized = true
+            locationManager.startUpdatingLocation()
+        case .notDetermined:
+            locationManager.requestWhenInUseAuthorization()
+            // Will start updates in didChangeAuthorization callback
+        default:
+            print("Location permission denied")
+        }
     }
 
     // MARK: - Barometer
@@ -243,7 +289,7 @@ final class CaptureEngine: NSObject, ObservableObject {
     private func startBarometer() {
         guard CMAltimeter.isRelativeAltitudeAvailable() else { return }
         altimeter.startRelativeAltitudeUpdates(to: .main) { [weak self] data, error in
-            guard let self, let data, self.isRecording else { return }
+            guard let self, let data, self.recording else { return }
             let t = self.clock.nowNanos
             let pressure = data.pressure.doubleValue  // kPa
             let relAlt = data.relativeAltitude.doubleValue  // meters
@@ -260,6 +306,11 @@ final class CaptureEngine: NSObject, ObservableObject {
         let inputNode = engine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
 
+        guard format.sampleRate > 0 else {
+            print("Audio: No valid input format available")
+            return
+        }
+
         let audioURL = dir.appendingPathComponent("audio.wav")
 
         do {
@@ -271,10 +322,14 @@ final class CaptureEngine: NSObject, ObservableObject {
                                             AVLinearPCMBitDepthKey: 16,
                                             AVLinearPCMIsFloatKey: false
                                         ])
+            audioLock.lock()
             audioFile = file
+            audioLock.unlock()
 
             inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
-                guard let self, self.isRecording else { return }
+                guard let self, self.recording else { return }
+                self.audioLock.lock()
+                defer { self.audioLock.unlock() }
                 do {
                     try self.audioFile?.write(from: buffer)
                 } catch {
@@ -377,10 +432,15 @@ final class CaptureEngine: NSObject, ObservableObject {
 
     private func writeDepthFrame(_ depthMap: CVPixelBuffer) {
         guard let depthDir else { return }
-        let index = depthFrameIndex
-        depthFrameIndex += 1
 
+        // Atomic increment for thread-safe frame indexing
+        let index = OSAtomicIncrement32(&depthFrameIndex) - 1
+
+        // Retain the pixel buffer so it survives into the async block
+        CVPixelBufferRetain(depthMap)
         writeQueue.async {
+            defer { CVPixelBufferRelease(depthMap) }
+
             CVPixelBufferLockBaseAddress(depthMap, .readOnly)
             defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
 
@@ -461,7 +521,7 @@ final class CaptureEngine: NSObject, ObservableObject {
 
 extension CaptureEngine: ARSessionDelegate {
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        guard isRecording else { return }
+        guard recording else { return }
         let t = clock.nowNanos
 
         // --- Video frame ---
@@ -471,7 +531,7 @@ extension CaptureEngine: ARSessionDelegate {
             setupVideoWriter(pixelBuffer: pixelBuffer)
         }
 
-        if let writer = assetWriter, writer.status == .readyForMoreMediaData || writer.status == .writing {
+        if let writer = assetWriter, writer.status == .writing {
             let frameTime = CMTime(value: Int64(t), timescale: 1_000_000_000)
             if videoStartTime == nil {
                 videoStartTime = frameTime
@@ -548,12 +608,22 @@ extension CaptureEngine: ARSessionDelegate {
 
 extension CaptureEngine: CLLocationManagerDelegate {
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-        guard isRecording else { return }
+        guard recording else { return }
         for loc in locations {
             let t = clock.nowNanos
             let line = "\(t),\(loc.coordinate.latitude),\(loc.coordinate.longitude),\(loc.altitude),\(loc.horizontalAccuracy),\(loc.verticalAccuracy),\(loc.speed),\(loc.course)\n"
             appendToHandle(gpsHandle, line)
             DispatchQueue.main.async { self.gpsActive = true }
+        }
+    }
+
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        let status = manager.authorizationStatus
+        if status == .authorizedWhenInUse || status == .authorizedAlways {
+            locationAuthorized = true
+            if recording {
+                manager.startUpdatingLocation()
+            }
         }
     }
 

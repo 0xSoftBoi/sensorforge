@@ -183,7 +183,7 @@ final class BLEBridge: NSObject, ObservableObject {
         connectionState = .scanning
 
         centralManager.scanForPeripherals(withServices: nil, options: [
-            CBCentralManagerScanOptionAllowDuplicatesKey: true  // needed for RSSI updates
+            CBCentralManagerScanOptionAllowDuplicatesKey: false
         ])
 
         // Auto-stop scan after 15 seconds
@@ -425,10 +425,8 @@ extension BLEBridge: CBPeripheralDelegate {
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         guard let chars = service.characteristics else { return }
-        var count = connectedDevice?.characteristicCount ?? 0
 
         for char in chars {
-            count += 1
             if char.properties.contains(.notify) || char.properties.contains(.indicate) {
                 peripheral.setNotifyValue(true, for: char)
             }
@@ -438,7 +436,7 @@ extension BLEBridge: CBPeripheralDelegate {
         }
 
         if var device = connectedDevice {
-            device.characteristicCount = count
+            device.characteristicCount += chars.count
             connectedDevice = device
         }
         connectionState = .connected(deviceName: peripheral.name ?? "Device")

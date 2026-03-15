@@ -86,6 +86,12 @@ struct MainCaptureView: View {
                     .fill(.red)
                     .frame(width: 12, height: 12)
                     .opacity(pulsingOpacity)
+                    .onAppear {
+                        withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+                            pulsingOpacity = 0.3
+                        }
+                    }
+                    .onDisappear { pulsingOpacity = 1.0 }
                 Text("RECORDING")
                     .font(.headline)
                     .foregroundColor(.red)
@@ -211,7 +217,7 @@ struct MainCaptureView: View {
     // MARK: - Share Sheet
 
     private var shareSheet: some View {
-        NavigationView {
+        NavigationStack {
             VStack(spacing: 20) {
                 if let url = engine.lastSessionURL {
                     Text("Session saved to:")

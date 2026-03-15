@@ -7,7 +7,7 @@ struct BLEPairingView: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             ZStack {
                 Color.black.ignoresSafeArea()
 
@@ -261,11 +261,8 @@ struct BLEPairingView: View {
                 .foregroundColor(.gray)
                 .padding(.leading, 4)
 
-            ForEach(ble.discoveredDevices) { device in
-                // Don't show already-connected device in the list
-                if device.id != ble.connectedDevice?.id {
-                    discoveredDeviceRow(device)
-                }
+            ForEach(ble.discoveredDevices.filter { $0.id != ble.connectedDevice?.id }) { device in
+                discoveredDeviceRow(device)
             }
         }
     }

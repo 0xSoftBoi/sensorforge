@@ -25,6 +25,11 @@
 	<key>UIRequiredDeviceCapabilities</key>
 	<array>
 		<string>arkit</string>
+		<string>accelerometer</string>
+		<string>gyroscope</string>
+		<string>magnetometer</string>
+		<string>location-services</string>
+		<string>bluetooth-le</string>
 	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>SensorForge records video and LiDAR depth for robotics datasets. Camera data is saved locally and only shared when you choose to export.</string>

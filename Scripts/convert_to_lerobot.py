@@ -164,6 +164,22 @@ def convert_session(session_dir, output_dir):
         shutil.copy2(video_src, video_dir / f"{episode_name}.mp4")
         print("Copied video.mp4")
 
+    # Copy BLE telemetry (raw, not interpolated — variable-rate data)
+    ble_src = session_dir / "ble_telemetry.csv"
+    if ble_src.exists() and ble:
+        ble_dir = output_dir / "data" / "ble"
+        ble_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ble_src, ble_dir / f"{episode_name}_ble.csv")
+        print(f"Copied BLE telemetry ({len(ble)} rows)")
+
+    # Copy audio
+    audio_src = session_dir / "audio.wav"
+    if audio_src.exists():
+        audio_dir = output_dir / "data" / "audio"
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(audio_src, audio_dir / f"{episode_name}.wav")
+        print("Copied audio.wav")
+
     # Write info.json (LeRobot v3.0 schema)
     # Build features from first merged row
     features = {}
@@ -177,12 +193,18 @@ def convert_session(session_dir, output_dir):
             elif isinstance(val, str):
                 features[key] = {"dtype": "string", "shape": [1]}
 
+    # Get video resolution from session metadata, fall back to defaults
+    video_resolution = [1080, 1920, 3]
+    sensors_meta = session_meta.get("sensors", {})
+    video_fps = sensors_meta.get("video_fps", 30)
+    video_codec = sensors_meta.get("video_codec", "hevc")
+
     features["observation.video"] = {
         "dtype": "video",
-        "shape": [1080, 1920, 3],
+        "shape": video_resolution,
         "video_info": {
-            "video.fps": 30,
-            "video.codec": "hevc",
+            "video.fps": video_fps,
+            "video.codec": video_codec,
         }
     }
 

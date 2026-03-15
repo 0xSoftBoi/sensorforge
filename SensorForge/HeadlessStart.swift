@@ -1,5 +1,4 @@
 import Foundation
-import CoreMotion
 import UIKit
 import AVFoundation
 import AppIntents
@@ -25,20 +24,17 @@ final class CountdownStarter: ObservableObject {
             self.secondsRemaining -= 1
 
             if self.secondsRemaining > 0 {
-                // Tick sound
                 AudioServicesPlaySystemSound(1057)
             } else {
-                // Triple vibrate on start
-                for i in 0..<3 {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + Double(i) * 0.2) {
-                        AudioServicesPlaySystemSound(kSystemSoundID_Vibrate)
-                    }
-                }
-                AudioServicesPlaySystemSound(1025)  // Start chime
+                // Vibrate + chime on start
+                AudioServicesPlaySystemSound(kSystemSoundID_Vibrate)
+                AudioServicesPlaySystemSound(1025)
                 self.timer?.invalidate()
                 self.timer = nil
                 self.isCountingDown = false
-                self.onComplete?()
+                let completion = self.onComplete
+                self.onComplete = nil
+                completion?()
             }
         }
     }
@@ -48,56 +44,65 @@ final class CountdownStarter: ObservableObject {
         timer = nil
         isCountingDown = false
         secondsRemaining = 0
+        onComplete = nil
     }
 }
 
 // MARK: - Shake Detector
 
-/// Detects 3 shakes within 2 seconds at >2.5G to toggle recording.
-/// Works when phone is mounted and screen may be hard to reach.
+/// Detects shake gestures via UIDevice motion events to toggle recording.
+/// Does NOT use its own CMMotionManager — avoids conflict with CaptureEngine.
+/// Uses the standard UIResponder shake gesture (motionBegan/motionEnded).
 final class ShakeDetector: ObservableObject {
     @Published var isEnabled = true
 
-    private let motionManager = CMMotionManager()
-    private var shakeTimes: [Date] = []
-    private let shakeThreshold: Double = 2.5  // G-force
-    private let shakeWindow: TimeInterval = 2.0
-    private let requiredShakes = 3
     private var onToggle: (() -> Void)?
+    private var lastShakeTime: Date = .distantPast
+    private let cooldown: TimeInterval = 2.0  // prevent double-triggers
 
     func start(onToggle: @escaping () -> Void) {
         self.onToggle = onToggle
-        guard motionManager.isAccelerometerAvailable else { return }
-
-        motionManager.accelerometerUpdateInterval = 1.0 / 50.0
-        motionManager.startAccelerometerUpdates(to: .main) { [weak self] data, _ in
-            guard let self, self.isEnabled, let data else { return }
-            let magnitude = sqrt(
-                data.acceleration.x * data.acceleration.x +
-                data.acceleration.y * data.acceleration.y +
-                data.acceleration.z * data.acceleration.z
-            )
-
-            if magnitude > self.shakeThreshold {
-                let now = Date()
-                self.shakeTimes.append(now)
-                // Remove old shakes outside window
-                self.shakeTimes = self.shakeTimes.filter {
-                    now.timeIntervalSince($0) < self.shakeWindow
-                }
-
-                if self.shakeTimes.count >= self.requiredShakes {
-                    self.shakeTimes.removeAll()
-                    AudioServicesPlaySystemSound(kSystemSoundID_Vibrate)
-                    self.onToggle?()
-                }
-            }
-        }
+        // Enable shake detection via UIDevice
+        UIDevice.current.isProximityMonitoringEnabled = false
+        // The actual shake detection happens in ShakeDetectingWindow
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(handleShake),
+            name: .deviceDidShake, object: nil
+        )
     }
 
     func stop() {
-        motionManager.stopAccelerometerUpdates()
+        NotificationCenter.default.removeObserver(self, name: .deviceDidShake, object: nil)
+        onToggle = nil
     }
+
+    @objc private func handleShake() {
+        guard isEnabled else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastShakeTime) > cooldown else { return }
+        lastShakeTime = now
+        AudioServicesPlaySystemSound(kSystemSoundID_Vibrate)
+        onToggle?()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+}
+
+/// Custom UIWindow subclass that intercepts shake gestures and posts a notification.
+/// Set this as the app's window class to enable shake detection without CMMotionManager.
+class ShakeDetectingWindow: UIWindow {
+    override func motionBegan(_ motion: UIEvent.EventSubtype, with event: UIEvent?) {
+        if motion == .motionShake {
+            NotificationCenter.default.post(name: .deviceDidShake, object: nil)
+        }
+        super.motionBegan(motion, with: event)
+    }
+}
+
+extension Notification.Name {
+    static let deviceDidShake = Notification.Name("com.sensorforge.deviceDidShake")
 }
 
 // MARK: - Screen Keep Awake
@@ -126,7 +131,6 @@ struct StartRecordingIntent: AppIntent {
     static var openAppWhenRun: Bool = true
 
     func perform() async throws -> some IntentResult {
-        // Post notification that the app will pick up
         NotificationCenter.default.post(name: .siriStartRecording, object: nil)
         return .result()
     }
@@ -170,7 +174,7 @@ struct SensorForgeShortcuts: AppShortcutsProvider {
     }
 }
 
-// MARK: - Notification Names
+// MARK: - Notification Names (Siri)
 
 extension Notification.Name {
     static let siriStartRecording = Notification.Name("com.sensorforge.siri.start")
