@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSCameraUsageDescription</key>
+	<string>SensorForge uses the camera and LiDAR for synchronized RGB+depth capture with ARKit.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>SensorForge captures spatial audio synchronized with other sensor streams.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>SensorForge records GPS coordinates synchronized with other sensor data.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>SensorForge uses Bluetooth to connect to external robots and sensors for synchronized data capture.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+		<string>location</string>
+	</array>
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>arkit</string>
+		<string>iphone-ipad-minimum-performance-a12</string>
+	</array>
+</dict>
+</plist>
