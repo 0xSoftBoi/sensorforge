@@ -130,10 +130,10 @@ final class CaptureEngine: NSObject, ObservableObject {
         // Open CSV files
         openCSVFiles(in: dir)
 
-        // Set bridge outputs
+        // Set bridge outputs (unconditional — bridges handle their own connected state)
         bleBridge?.setOutputDirectory(dir)
+        wifiBridge?.setOutputDirectory(dir)
         if wifiBridge?.isConnected == true {
-            wifiBridge?.setOutputDirectory(dir)
             DispatchQueue.main.async { self.ugvActive = true }
         }
 

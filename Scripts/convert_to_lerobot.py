@@ -141,14 +141,16 @@ def convert_session(session_dir, output_dir):
         for k, v in baro_interp[i].items():
             row[f"baro.{k}"] = v
 
-        # UGV IMU
+        # UGV IMU (only IMU-relevant columns — avoid zero-filled chassis columns)
+        ugv_imu_keys = {"heading", "accel_x", "accel_y", "accel_z", "pitch", "roll"}
         for k, v in ugv_imu_interp[i].items():
-            if k != "type":
+            if k in ugv_imu_keys:
                 row[f"ugv.{k}"] = v
 
-        # UGV Chassis
+        # UGV Chassis (only chassis-relevant columns — avoid zero-filled IMU columns)
+        ugv_chassis_keys = {"left_speed", "right_speed", "battery_v", "battery_a"}
         for k, v in ugv_chassis_interp[i].items():
-            if k != "type":
+            if k in ugv_chassis_keys:
                 row[f"ugv.{k}"] = v
 
         merged.append(row)

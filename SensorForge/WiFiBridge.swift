@@ -1,6 +1,5 @@
 import Foundation
 import Combine
-import Network
 
 /// Connects to a Waveshare UGV (or similar ESP32 robot) over WiFi HTTP,
 /// polls telemetry at 10Hz, and logs structured data to CSV.
@@ -21,18 +20,20 @@ final class WiFiBridge: ObservableObject {
     @Published var telemetryRate: Double = 0
     @Published var batteryVoltage: Double = 0
     @Published var messageCount: Int = 0
+    @Published var connectionError: String?
 
     // MARK: - Private
 
     private var pollTimer: Timer?
     private var heartbeatTimer: Timer?
     private var outputHandle: FileHandle?
+    private let outputLock = NSLock()  // protects isLogging + outputHandle
     private let clock = SyncClock.shared
     private let writeQueue = DispatchQueue(label: "com.sensorforge.wifi.write", qos: .userInitiated)
     private let session: URLSession
-    private var messagesThisSecond: Int = 0
+    private var messageCounter: Int32 = 0  // atomic counter for thread-safe rate tracking
     private var rateTimer: Timer?
-    private var monitor: NWPathMonitor?
+    private var pollIMUNext = true  // alternates IMU/chassis to halve request rate
 
     // MARK: - Init
 
@@ -44,19 +45,17 @@ final class WiFiBridge: ObservableObject {
         self.session = URLSession(configuration: config)
     }
 
-    deinit {
-        disconnect()
-    }
-
     // MARK: - Connection
 
     /// Attempt to connect to the UGV at the configured host:port.
     /// Sends a test command to verify the device responds.
     func connect() {
-        let url = baseURL
-        guard let requestURL = URL(string: "\(url)") else { return }
+        connectionError = nil
+        guard let requestURL = URL(string: baseURL) else {
+            connectionError = "Invalid IP address"
+            return
+        }
 
-        // Probe: send a no-op status request
         var request = URLRequest(url: requestURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -69,11 +68,17 @@ final class WiFiBridge: ObservableObject {
                    httpResponse.statusCode == 200,
                    data != nil {
                     self.isConnected = true
+                    self.connectionError = nil
                     self.startPolling()
                     self.startHeartbeat()
                     self.startRateTracking()
                 } else {
                     self.isConnected = false
+                    if let error {
+                        self.connectionError = error.localizedDescription
+                    } else {
+                        self.connectionError = "No response from UGV"
+                    }
                 }
             }
         }.resume()
@@ -84,8 +89,9 @@ final class WiFiBridge: ObservableObject {
         stopHeartbeat()
         stopRateTracking()
         stopLogging()
-        DispatchQueue.main.async {
-            self.isConnected = false
+        DispatchQueue.main.async { [weak self] in
+            self?.isConnected = false
+            self?.connectionError = nil
         }
     }
 
@@ -106,14 +112,19 @@ final class WiFiBridge: ObservableObject {
         pollTimer = nil
     }
 
+    /// Alternates between IMU and chassis requests each tick.
+    /// This keeps total rate at 10 req/s instead of 20, avoiding ESP32 overload.
     private func pollTelemetry() {
-        // Poll IMU and chassis in parallel
-        sendCommand(["T": 126]) { [weak self] imuData in
-            self?.handleIMUResponse(imuData)
+        if pollIMUNext {
+            sendCommand(["T": 126]) { [weak self] imuData in
+                self?.handleIMUResponse(imuData)
+            }
+        } else {
+            sendCommand(["T": 130]) { [weak self] chassisData in
+                self?.handleChassisResponse(chassisData)
+            }
         }
-        sendCommand(["T": 130]) { [weak self] chassisData in
-            self?.handleChassisResponse(chassisData)
-        }
+        pollIMUNext.toggle()
     }
 
     private func sendCommand(_ command: [String: Any], completion: @escaping ([String: Any]?) -> Void) {
@@ -135,7 +146,6 @@ final class WiFiBridge: ObservableObject {
         session.dataTask(with: request) { data, response, error in
             guard let data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                // Connection lost
                 if error != nil {
                     DispatchQueue.main.async { [weak self] in
                         self?.isConnected = false
@@ -156,8 +166,6 @@ final class WiFiBridge: ObservableObject {
         guard let data else { return }
         let t = clock.nowNanos
 
-        // Waveshare IMU response fields (from QMI8658C + AK09918):
-        // heading, accelX, accelY, accelZ, pitch, roll, temperature
         let heading = (data["heading"] as? NSNumber)?.doubleValue ?? 0
         let accelX = (data["accelX"] as? NSNumber)?.doubleValue
             ?? (data["ax"] as? NSNumber)?.doubleValue ?? 0
@@ -176,7 +184,6 @@ final class WiFiBridge: ObservableObject {
         guard let data else { return }
         let t = clock.nowNanos
 
-        // Waveshare chassis response: left/right encoder speeds, battery voltage/current
         let leftSpeed = (data["leftSpeed"] as? NSNumber)?.doubleValue
             ?? (data["L"] as? NSNumber)?.doubleValue ?? 0
         let rightSpeed = (data["rightSpeed"] as? NSNumber)?.doubleValue
@@ -186,8 +193,8 @@ final class WiFiBridge: ObservableObject {
         let current = (data["current"] as? NSNumber)?.doubleValue
             ?? (data["a"] as? NSNumber)?.doubleValue ?? 0
 
-        DispatchQueue.main.async {
-            self.batteryVoltage = voltage
+        DispatchQueue.main.async { [weak self] in
+            self?.batteryVoltage = voltage
         }
 
         let line = "\(t),chassis,0,0,0,0,0,0,\(leftSpeed),\(rightSpeed),\(voltage),\(current)\n"
@@ -200,7 +207,6 @@ final class WiFiBridge: ObservableObject {
     /// Waveshare UGVs stop motors if no command received within 3 seconds.
     private func startHeartbeat() {
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            // Send a zero-speed command as heartbeat (doesn't move the robot)
             self?.sendCommand(["T": 1, "L": 0, "R": 0]) { _ in }
         }
     }
@@ -216,23 +222,38 @@ final class WiFiBridge: ObservableObject {
         let url = dir.appendingPathComponent("ugv_telemetry.csv")
         let header = "timestamp_ns,type,heading,accel_x,accel_y,accel_z,pitch,roll,left_speed,right_speed,battery_v,battery_a\n"
         FileManager.default.createFile(atPath: url.path, contents: header.data(using: .utf8))
+
+        outputLock.lock()
         outputHandle = try? FileHandle(forWritingTo: url)
         outputHandle?.seekToEndOfFile()
         isLogging = true
+        outputLock.unlock()
+
         messageCount = 0
     }
 
     func stopLogging() {
+        outputLock.lock()
         isLogging = false
         try? outputHandle?.close()
         outputHandle = nil
+        outputLock.unlock()
     }
 
+    /// Thread-safe append. Called from URLSession background threads.
     private func appendLine(_ line: String) {
-        messagesThisSecond += 1
-        DispatchQueue.main.async { self.messageCount += 1 }
+        OSAtomicIncrement32(&messageCounter)
+        DispatchQueue.main.async { [weak self] in
+            self?.messageCount += 1
+        }
 
-        guard isLogging, let handle = outputHandle, let data = line.data(using: .utf8) else { return }
+        outputLock.lock()
+        guard isLogging, let handle = outputHandle, let data = line.data(using: .utf8) else {
+            outputLock.unlock()
+            return
+        }
+        outputLock.unlock()
+
         writeQueue.async {
             handle.write(data)
         }
@@ -241,11 +262,11 @@ final class WiFiBridge: ObservableObject {
     // MARK: - Rate Tracking
 
     private func startRateTracking() {
-        messagesThisSecond = 0
+        OSAtomicCompareAndSwap32(messageCounter, 0, &messageCounter)
         rateTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self else { return }
-            let count = self.messagesThisSecond
-            self.messagesThisSecond = 0
+            let count = self.messageCounter
+            OSAtomicCompareAndSwap32(count, 0, &self.messageCounter)
             DispatchQueue.main.async {
                 self.telemetryRate = Double(count)
             }

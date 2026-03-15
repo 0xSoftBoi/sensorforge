@@ -52,7 +52,7 @@ struct MainCaptureView: View {
     // MARK: - Sensor Grid
 
     private var sensorGrid: some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 8) {
             SensorTile(label: "IMU", active: engine.imuActive, icon: "gyroscope")
             SensorTile(label: "GPS", active: engine.gpsActive, icon: "location.fill")
             SensorTile(label: "DEPTH", active: engine.depthActive, icon: "camera.metering.matrix")
@@ -60,6 +60,7 @@ struct MainCaptureView: View {
             SensorTile(label: "AUDIO", active: engine.audioActive, icon: "waveform")
             SensorTile(label: "BLE", active: ble.connectedDevice != nil, icon: "antenna.radiowaves.left.and.right")
             SensorTile(label: "UGV", active: ugv.isConnected, icon: "car.fill")
+            SensorTile(label: "VIDEO", active: engine.frameCount > 0, icon: "video.fill")
         }
     }
 
@@ -326,6 +327,13 @@ struct MainCaptureView: View {
                             ugv.connect()
                         }
                         .buttonStyle(.borderedProminent)
+
+                        if let error = ugv.connectionError {
+                            Text(error)
+                                .font(.caption)
+                                .foregroundColor(.red)
+                                .multilineTextAlignment(.center)
+                        }
                     }
                 }
             }
