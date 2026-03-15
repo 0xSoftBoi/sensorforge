@@ -50,6 +50,10 @@ final class MotionManager: ObservableObject {
 
         motionManager.deviceMotionUpdateInterval = imuInterval
         motionManager.startDeviceMotionUpdates(using: .xArbitraryCorrectedZVertical, to: .main) { [weak self] motion, error in
+            if let error {
+                print("[MotionManager] Device motion error: \(error)")
+                return
+            }
             guard let self, let motion else { return }
 
             let ts = SensorTimestamp(bootTime: motion.timestamp)
@@ -94,6 +98,10 @@ final class MotionManager: ObservableObject {
 
         motionManager.magnetometerUpdateInterval = magInterval
         motionManager.startMagnetometerUpdates(to: .main) { [weak self] magnetData, error in
+            if let error {
+                print("[MotionManager] Magnetometer error: \(error)")
+                return
+            }
             guard let self, let magnetData else { return }
 
             let ts = SensorTimestamp(bootTime: magnetData.timestamp)

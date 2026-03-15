@@ -69,12 +69,22 @@ final class AudioCaptureManager: ObservableObject {
             return
         }
 
+        // Validate input format before proceeding
+        guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
+            print("[AudioCapture] Invalid input format: sampleRate=\(inputFormat.sampleRate) channels=\(inputFormat.channelCount)")
+            return
+        }
+
         // Install tap for recording and level metering
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, time in
             guard let self else { return }
 
             // Write to file
-            try? self.audioFile?.write(from: buffer)
+            do {
+                try self.audioFile?.write(from: buffer)
+            } catch {
+                print("[AudioCapture] Write error: \(error)")
+            }
 
             // Update level meter
             let level = self.calculateRMSLevel(buffer: buffer)

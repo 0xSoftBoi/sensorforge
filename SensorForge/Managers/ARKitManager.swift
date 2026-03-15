@@ -13,11 +13,13 @@ final class ARKitManager: NSObject, ObservableObject {
     private var dataStore: SensorDataStore?
     private var sessionDirectory: URL?
     private var frameIndex = 0
-    private var lastFrameTime: TimeInterval = 0
     private var fpsCounter = 0
     private var fpsTimer: TimeInterval = 0
 
-    // Video writer
+    // Serial queue protecting all video writer state and frame counters
+    private let writerQueue = DispatchQueue(label: "com.sensorforge.arkit.writer")
+
+    // Video writer — only accessed on writerQueue
     private var videoWriter: AVAssetWriter?
     private var videoWriterInput: AVAssetWriterInput?
     private var pixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor?
@@ -63,7 +65,7 @@ final class ARKitManager: NSObject, ObservableObject {
         }
 
         session.run(config)
-        isRunning = true
+        DispatchQueue.main.async { self.isRunning = true }
 
         setupVideoWriter(sessionDirectory: sessionDirectory)
     }
@@ -71,46 +73,54 @@ final class ARKitManager: NSObject, ObservableObject {
     func stop() {
         session?.pause()
         session = nil
-        isRunning = false
+        DispatchQueue.main.async { self.isRunning = false }
         finalizeVideoWriter()
     }
 
     // MARK: - Video Writer
 
     private func setupVideoWriter(sessionDirectory: URL) {
-        let videoURL = sessionDirectory.appendingPathComponent("rgb_video.mp4")
+        writerQueue.async { [weak self] in
+            guard let self else { return }
 
-        guard let writer = try? AVAssetWriter(url: videoURL, fileType: .mp4) else { return }
+            let videoURL = sessionDirectory.appendingPathComponent("rgb_video.mp4")
 
-        let settings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.hevc,
-            AVVideoWidthKey: 1920,
-            AVVideoHeightKey: 1440,
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: 20_000_000,
-                AVVideoExpectedSourceFrameRateKey: 30
+            guard let writer = try? AVAssetWriter(url: videoURL, fileType: .mp4) else {
+                print("[ARKitManager] Failed to create video writer at \(videoURL)")
+                return
+            }
+
+            let settings: [String: Any] = [
+                AVVideoCodecKey: AVVideoCodecType.hevc,
+                AVVideoWidthKey: 1920,
+                AVVideoHeightKey: 1440,
+                AVVideoCompressionPropertiesKey: [
+                    AVVideoAverageBitRateKey: 20_000_000,
+                    AVVideoExpectedSourceFrameRateKey: 30
+                ]
             ]
-        ]
 
-        let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
-        input.expectsMediaDataInRealTime = true
+            let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
+            input.expectsMediaDataInRealTime = true
 
-        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
-            assetWriterInput: input,
-            sourcePixelBufferAttributes: [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
-            ]
-        )
+            let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+                assetWriterInput: input,
+                sourcePixelBufferAttributes: [
+                    kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+                ]
+            )
 
-        writer.add(input)
-        writer.startWriting()
+            writer.add(input)
+            writer.startWriting()
 
-        self.videoWriter = writer
-        self.videoWriterInput = input
-        self.pixelBufferAdaptor = adaptor
+            self.videoWriter = writer
+            self.videoWriterInput = input
+            self.pixelBufferAdaptor = adaptor
+        }
     }
 
-    private func writeVideoFrame(_ pixelBuffer: CVPixelBuffer, timestamp: TimeInterval) {
+    /// Must be called on writerQueue.
+    private func writeVideoFrameOnQueue(_ pixelBuffer: CVPixelBuffer, timestamp: TimeInterval) {
         guard let writer = videoWriter,
               let input = videoWriterInput,
               let adaptor = pixelBufferAdaptor,
@@ -129,19 +139,25 @@ final class ARKitManager: NSObject, ObservableObject {
     }
 
     private func finalizeVideoWriter() {
-        guard let writer = videoWriter, writer.status == .writing else {
-            videoWriter = nil
-            videoWriterInput = nil
-            pixelBufferAdaptor = nil
-            videoStartTime = nil
-            return
-        }
-        videoWriterInput?.markAsFinished()
-        writer.finishWriting { [weak self] in
-            self?.videoWriter = nil
-            self?.videoWriterInput = nil
-            self?.pixelBufferAdaptor = nil
-            self?.videoStartTime = nil
+        writerQueue.async { [weak self] in
+            guard let self else { return }
+            guard let writer = self.videoWriter, writer.status == .writing else {
+                self.videoWriter = nil
+                self.videoWriterInput = nil
+                self.pixelBufferAdaptor = nil
+                self.videoStartTime = nil
+                return
+            }
+            self.videoWriterInput?.markAsFinished()
+            writer.finishWriting {
+                // Cleanup on writerQueue to avoid races
+                self.writerQueue.async {
+                    self.videoWriter = nil
+                    self.videoWriterInput = nil
+                    self.pixelBufferAdaptor = nil
+                    self.videoStartTime = nil
+                }
+            }
         }
     }
 }
@@ -152,12 +168,17 @@ extension ARKitManager: ARSessionDelegate {
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         let ts = SensorTimestamp(bootTime: frame.timestamp)
 
-        // FPS tracking
-        fpsCounter += 1
-        if frame.timestamp - fpsTimer >= 1.0 {
-            DispatchQueue.main.async { self.currentFPS = Double(self.fpsCounter) }
-            fpsCounter = 0
-            fpsTimer = frame.timestamp
+        // FPS tracking — dispatch counter updates to writerQueue to avoid races
+        writerQueue.async { [weak self] in
+            guard let self else { return }
+            self.fpsCounter += 1
+            if frame.timestamp - self.fpsTimer >= 1.0 {
+                let fps = Double(self.fpsCounter)
+                DispatchQueue.main.async { self.currentFPS = fps }
+                self.fpsCounter = 0
+                self.fpsTimer = frame.timestamp
+            }
+            self.frameIndex += 1
         }
 
         // Tracking state
@@ -201,14 +222,16 @@ extension ARKitManager: ARSessionDelegate {
             depthHeight: depthH
         )
 
-        // Write video frame
-        writeVideoFrame(frame.capturedImage, timestamp: frame.timestamp)
+        // Write video frame on the writer queue
+        let capturedImage = frame.capturedImage
+        let frameTimestamp = frame.timestamp
+        writerQueue.async { [weak self] in
+            self?.writeVideoFrameOnQueue(capturedImage, timestamp: frameTimestamp)
+        }
 
         Task { @MainActor in
             self.dataStore?.frames.append(frameData)
         }
-
-        frameIndex += 1
     }
 
     func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {

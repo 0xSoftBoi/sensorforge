@@ -73,7 +73,11 @@ final class SessionStore {
     var sessionsDirectory: URL {
         let docs = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let dir = docs.appendingPathComponent("SensorForge", isDirectory: true)
-        try? fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
+        do {
+            try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
+        } catch {
+            print("[SessionStore] Failed to create sessions directory: \(error)")
+        }
         return dir
     }
 
@@ -82,24 +86,46 @@ final class SessionStore {
     }
 
     func loadSessions() -> [SessionMetadata] {
-        guard let data = try? Data(contentsOf: metadataURL) else { return [] }
-        return (try? JSONDecoder().decode([SessionMetadata].self, from: data)) ?? []
+        let url = metadataURL
+        guard fileManager.fileExists(atPath: url.path) else { return [] }
+        do {
+            let data = try Data(contentsOf: url)
+            return try JSONDecoder().decode([SessionMetadata].self, from: data)
+        } catch {
+            print("[SessionStore] Failed to load sessions: \(error)")
+            return []
+        }
     }
 
     func saveSessions(_ sessions: [SessionMetadata]) {
-        let data = try? JSONEncoder().encode(sessions)
-        try? data?.write(to: metadataURL, options: .atomic)
+        do {
+            let data = try JSONEncoder().encode(sessions)
+            try data.write(to: metadataURL, options: .atomic)
+        } catch {
+            print("[SessionStore] Failed to save sessions: \(error)")
+        }
     }
 
     func sessionDirectory(for metadata: SessionMetadata) -> URL {
-        let dir = sessionsDirectory.appendingPathComponent(metadata.exportDirectoryName, isDirectory: true)
-        try? fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
+        // Validate directory name contains only safe characters
+        let safeName = metadata.exportDirectoryName.filter { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }
+        let dirName = safeName.isEmpty ? "session_unknown" : safeName
+        let dir = sessionsDirectory.appendingPathComponent(dirName, isDirectory: true)
+        do {
+            try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
+        } catch {
+            print("[SessionStore] Failed to create session directory: \(error)")
+        }
         return dir
     }
 
     func deleteSession(_ metadata: SessionMetadata) {
         let dir = sessionDirectory(for: metadata)
-        try? fileManager.removeItem(at: dir)
+        do {
+            try fileManager.removeItem(at: dir)
+        } catch {
+            print("[SessionStore] Failed to delete session directory: \(error)")
+        }
 
         var sessions = loadSessions()
         sessions.removeAll { $0.id == metadata.id }

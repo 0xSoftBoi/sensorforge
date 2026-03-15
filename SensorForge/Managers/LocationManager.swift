@@ -40,6 +40,7 @@ final class LocationManager: NSObject, ObservableObject {
 extension LocationManager: CLLocationManagerDelegate {
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         guard let location = locations.last else { return }
+        guard TimestampProvider.shared.isAnchored else { return }
 
         let ts = TimestampProvider.shared.now
         latestLocation = location

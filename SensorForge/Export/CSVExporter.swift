@@ -16,6 +16,27 @@ enum CSVExporter {
         exportMetadata(metadata, to: directory)
     }
 
+    // MARK: - CSV Escaping
+
+    /// Escapes a string value for safe CSV inclusion, preventing CSV injection attacks.
+    /// Handles formula injection (=, +, -, @, \t, \r) and proper quoting of special characters.
+    private static func escapeCSV(_ value: String) -> String {
+        let formulaPrefixes: [Character] = ["=", "+", "-", "@", "\t", "\r"]
+        let needsQuoting = value.contains(",") || value.contains("\"") || value.contains("\n") ||
+                           value.contains("\r") || formulaPrefixes.contains(where: { value.hasPrefix(String($0)) })
+
+        if !needsQuoting { return value }
+
+        var escaped = value.replacingOccurrences(of: "\"", with: "\"\"")
+
+        // Neutralize formula injection by prepending a single quote inside quotes
+        if let first = escaped.first, formulaPrefixes.contains(first) {
+            escaped = "'" + escaped
+        }
+
+        return "\"\(escaped)\""
+    }
+
     // MARK: - Camera Frames
 
     private static func exportFrames(_ frames: [ARFrameData], to dir: URL) {
@@ -39,7 +60,7 @@ enum CSVExporter {
             let wc = df.string(from: frame.timestamp.wallClock)
             let m = frame.cameraPose
 
-            csv += "\(st),\(frame.timestamp.bootTime),\(wc),\(frame.trackingState),"
+            csv += "\(st),\(frame.timestamp.bootTime),\(wc),\(escapeCSV(frame.trackingState)),"
             csv += "\(m[0][0]),\(m[0][1]),\(m[0][2]),\(m[0][3]),"
             csv += "\(m[1][0]),\(m[1][1]),\(m[1][2]),\(m[1][3]),"
             csv += "\(m[2][0]),\(m[2][1]),\(m[2][2]),\(m[2][3]),"
@@ -141,7 +162,7 @@ enum CSVExporter {
 
         for p in planes {
             let st = tp.sessionTime(from: p.timestamp.bootTime)
-            csv += "\(st),\(p.timestamp.bootTime),\(p.identifier),\(p.classification),"
+            csv += "\(st),\(p.timestamp.bootTime),\(p.identifier),\(escapeCSV(p.classification)),"
             csv += "\(p.extentX),\(p.extentZ),"
             csv += "\(p.transform[3][0]),\(p.transform[3][1]),\(p.transform[3][2])\n"
         }
@@ -154,13 +175,14 @@ enum CSVExporter {
     private static func exportMeshes(_ meshes: [MeshAnchorData], to dir: URL) {
         guard !meshes.isEmpty else { return }
 
-        var csv = "session_time_s,boot_time_s,identifier,vertex_count,face_count,"
+        var csv = "session_time_s,boot_time_s,identifier,classification,vertex_count,face_count,"
         csv += "position_x,position_y,position_z\n"
         let tp = TimestampProvider.shared
 
         for m in meshes {
             let st = tp.sessionTime(from: m.timestamp.bootTime)
-            csv += "\(st),\(m.timestamp.bootTime),\(m.identifier),\(m.vertexCount),\(m.faceCount),"
+            let classStr = escapeCSV(m.classification ?? "none")
+            csv += "\(st),\(m.timestamp.bootTime),\(m.identifier),\(classStr),\(m.vertexCount),\(m.faceCount),"
             csv += "\(m.transform[3][0]),\(m.transform[3][1]),\(m.transform[3][2])\n"
         }
 
@@ -178,8 +200,8 @@ enum CSVExporter {
         for t in telemetry {
             let st = tp.sessionTime(from: t.timestamp.bootTime)
             let parsedStr = t.parsedValues.map { "\($0.key)=\($0.value)" }.joined(separator: ";")
-            csv += "\(st),\(t.timestamp.bootTime),\(t.deviceName),\(t.deviceUUID),"
-            csv += "\(t.characteristicUUID),\(t.rawHex),\"\(parsedStr)\"\n"
+            csv += "\(st),\(t.timestamp.bootTime),\(escapeCSV(t.deviceName)),\(escapeCSV(t.deviceUUID)),"
+            csv += "\(escapeCSV(t.characteristicUUID)),\(escapeCSV(t.rawHex)),\(escapeCSV(parsedStr))\n"
         }
 
         write(csv, to: dir.appendingPathComponent("ble_telemetry.csv"))
@@ -190,14 +212,21 @@ enum CSVExporter {
     private static func exportMetadata(_ metadata: SessionMetadata, to dir: URL) {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        if let data = try? encoder.encode(metadata) {
-            try? data.write(to: dir.appendingPathComponent("session_metadata.json"), options: .atomic)
+        do {
+            let data = try encoder.encode(metadata)
+            try data.write(to: dir.appendingPathComponent("session_metadata.json"), options: .atomic)
+        } catch {
+            print("[CSVExporter] Failed to export metadata: \(error)")
         }
     }
 
     // MARK: - Helpers
 
     private static func write(_ content: String, to url: URL) {
-        try? content.write(to: url, atomically: true, encoding: .utf8)
+        do {
+            try content.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            print("[CSVExporter] Failed to write \(url.lastPathComponent): \(error)")
+        }
     }
 }

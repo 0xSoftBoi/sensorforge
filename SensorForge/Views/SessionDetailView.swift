@@ -77,9 +77,11 @@ struct SessionDetailView: View {
 
     private var fileListView: some View {
         let dir = SessionStore.shared.sessionDirectory(for: session)
-        let files = (try? FileManager.default.contentsOfDirectory(
+        let allFiles = (try? FileManager.default.contentsOfDirectory(
             at: dir, includingPropertiesForKeys: [.fileSizeKey]
         )) ?? []
+        // Only show files within the session directory (prevent path traversal)
+        let files = allFiles.filter { $0.standardizedFileURL.path.hasPrefix(dir.standardizedFileURL.path) }
 
         return List(files, id: \.absoluteString) { url in
             HStack {

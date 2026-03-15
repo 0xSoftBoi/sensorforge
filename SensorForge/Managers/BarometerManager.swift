@@ -20,7 +20,13 @@ final class BarometerManager: ObservableObject {
         self.dataStore = dataStore
 
         altimeter.startRelativeAltitudeUpdates(to: .main) { [weak self] altitudeData, error in
+            if let error {
+                print("[BarometerManager] Altimeter error: \(error)")
+                return
+            }
             guard let self, let altitudeData else { return }
+            guard let dataStore = self.dataStore else { return }
+            guard TimestampProvider.shared.isAnchored else { return }
 
             let ts = TimestampProvider.shared.now
             let pressure = altitudeData.pressure.doubleValue  // kPa
@@ -36,7 +42,7 @@ final class BarometerManager: ObservableObject {
             )
 
             Task { @MainActor in
-                self.dataStore?.barometerSamples.append(data)
+                dataStore.barometerSamples.append(data)
             }
         }
 

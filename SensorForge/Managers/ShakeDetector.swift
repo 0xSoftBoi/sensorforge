@@ -5,6 +5,9 @@ import UIKit
 ///
 /// Uses UIDevice motion events. The user shakes the phone 3 times within
 /// a 2-second window to trigger the callback.
+///
+/// Thread safety: `recordShake()` is called from `ShakeDetectingWindow.motionEnded(_:with:)`,
+/// which UIKit guarantees runs on the main thread. All mutable state is only accessed there.
 final class ShakeDetector: ObservableObject {
     @Published var isEnabled = true
     @Published var shakeCount = 0

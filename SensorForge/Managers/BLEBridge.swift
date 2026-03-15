@@ -115,7 +115,10 @@ extension BLEBridge: CBCentralManagerDelegate {
 
         if let index = discoveredDevices.firstIndex(where: { $0.id == peripheral.identifier }) {
             discoveredDevices[index].isConnected = true
-            connectedDevices.append(discoveredDevices[index])
+            // Avoid duplicate entries in connectedDevices
+            if !connectedDevices.contains(where: { $0.id == peripheral.identifier }) {
+                connectedDevices.append(discoveredDevices[index])
+            }
         }
     }
 
@@ -150,6 +153,10 @@ extension BLEBridge: CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        if let error {
+            print("[BLEBridge] Characteristic read error: \(error)")
+            return
+        }
         guard let value = characteristic.value else { return }
 
         let ts = TimestampProvider.shared.now

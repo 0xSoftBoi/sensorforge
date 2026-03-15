@@ -37,8 +37,12 @@ final class RecordingCoordinator: ObservableObject {
         session.hasBLE = !bleBridge.connectedDevices.isEmpty
         currentSession = session
 
-        // Create session directory
+        // Create session directory and validate it exists
         let sessionDir = SessionStore.shared.sessionDirectory(for: session)
+        guard FileManager.default.fileExists(atPath: sessionDir.path) else {
+            print("[RecordingCoordinator] Failed to create session directory: \(sessionDir.path)")
+            return
+        }
 
         // Reset data store
         dataStore.reset()
@@ -53,7 +57,7 @@ final class RecordingCoordinator: ObservableObject {
 
         isRecording = true
 
-        // Duration timer
+        // Duration timer — created AFTER all sensors start successfully
         durationTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
