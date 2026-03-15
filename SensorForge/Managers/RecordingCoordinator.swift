@@ -53,7 +53,7 @@ final class RecordingCoordinator: ObservableObject {
         locationManager.start(dataStore: dataStore)
         barometerManager.start(dataStore: dataStore)
         audioCaptureManager.start(dataStore: dataStore, sessionDirectory: sessionDir)
-        // BLE bridge continues if already scanning
+        bleBridge.start(dataStore: dataStore)
 
         isRecording = true
 

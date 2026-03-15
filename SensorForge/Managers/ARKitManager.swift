@@ -1,5 +1,6 @@
 import Foundation
 import ARKit
+import AVFoundation
 import Combine
 
 /// Manages the ARSession and captures frame data (camera pose, depth, mesh, planes, light).

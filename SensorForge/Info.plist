@@ -10,6 +10,8 @@
 	<string>SensorForge records GPS coordinates synchronized with other sensor data.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>SensorForge uses Bluetooth to connect to external robots and sensors for synchronized data capture.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>SensorForge records accelerometer, gyroscope, and barometer data during capture sessions.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>bluetooth-central</string>

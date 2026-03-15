@@ -13,6 +13,7 @@ enum CSVExporter {
         exportPlanes(dataStore.planeAnchors, to: directory)
         exportMeshes(dataStore.meshAnchors, to: directory)
         exportBLE(dataStore.bleTelemetry, to: directory)
+        exportAudio(dataStore.audioChunks, to: directory)
         exportMetadata(metadata, to: directory)
     }
 
@@ -205,6 +206,23 @@ enum CSVExporter {
         }
 
         write(csv, to: dir.appendingPathComponent("ble_telemetry.csv"))
+    }
+
+    // MARK: - Audio Chunks
+
+    private static func exportAudio(_ chunks: [AudioChunkMetadata], to dir: URL) {
+        guard !chunks.isEmpty else { return }
+
+        var csv = "session_time_s,boot_time_s,sample_rate_hz,channel_count,duration_s,file_path\n"
+        let tp = TimestampProvider.shared
+
+        for c in chunks {
+            let st = tp.sessionTime(from: c.timestamp.bootTime)
+            csv += "\(st),\(c.timestamp.bootTime),\(c.sampleRate),\(c.channelCount),"
+            csv += "\(c.durationSeconds),\(escapeCSV(c.filePath))\n"
+        }
+
+        write(csv, to: dir.appendingPathComponent("audio.csv"))
     }
 
     // MARK: - Session Metadata

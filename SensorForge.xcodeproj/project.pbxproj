@@ -389,6 +389,7 @@
 				INFOPLIST_KEY_NSCameraUsageDescription = "SensorForge uses the camera and LiDAR for synchronized RGB+depth capture with ARKit.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "SensorForge records GPS coordinates synchronized with other sensor data.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "SensorForge captures spatial audio synchronized with other sensor streams.";
+				INFOPLIST_KEY_NSMotionUsageDescription = "SensorForge records accelerometer, gyroscope, and barometer data during capture sessions.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -426,6 +427,7 @@
 				INFOPLIST_KEY_NSCameraUsageDescription = "SensorForge uses the camera and LiDAR for synchronized RGB+depth capture with ARKit.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "SensorForge records GPS coordinates synchronized with other sensor data.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "SensorForge captures spatial audio synchronized with other sensor streams.";
+				INFOPLIST_KEY_NSMotionUsageDescription = "SensorForge records accelerometer, gyroscope, and barometer data during capture sessions.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
