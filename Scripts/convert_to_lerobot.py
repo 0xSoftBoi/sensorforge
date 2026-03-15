@@ -92,6 +92,7 @@ def convert_session(session_dir, output_dir):
     gps = read_csv(session_dir / "gps.csv")
     mag = read_csv(session_dir / "magnetometer.csv")
     baro = read_csv(session_dir / "barometer.csv")
+    ugv = read_csv(session_dir / "ugv_telemetry.csv")
     ble = read_csv(session_dir / "ble_telemetry.csv")
 
     if not poses:
@@ -106,6 +107,12 @@ def convert_session(session_dir, output_dir):
     gps_interp = interpolate_to_timeline(gps, timeline_ns)
     mag_interp = interpolate_to_timeline(mag, timeline_ns)
     baro_interp = interpolate_to_timeline(baro, timeline_ns)
+
+    # UGV telemetry: filter to IMU rows only for interpolation (chassis rows are separate)
+    ugv_imu = [r for r in ugv if r.get("type") == "imu"]
+    ugv_chassis = [r for r in ugv if r.get("type") == "chassis"]
+    ugv_imu_interp = interpolate_to_timeline(ugv_imu, timeline_ns)
+    ugv_chassis_interp = interpolate_to_timeline(ugv_chassis, timeline_ns)
 
     # Merge into unified rows
     merged = []
@@ -133,6 +140,16 @@ def convert_session(session_dir, output_dir):
         # Barometer
         for k, v in baro_interp[i].items():
             row[f"baro.{k}"] = v
+
+        # UGV IMU
+        for k, v in ugv_imu_interp[i].items():
+            if k != "type":
+                row[f"ugv.{k}"] = v
+
+        # UGV Chassis
+        for k, v in ugv_chassis_interp[i].items():
+            if k != "type":
+                row[f"ugv.{k}"] = v
 
         merged.append(row)
 
@@ -244,7 +261,12 @@ def convert_session(session_dir, output_dir):
     print(f"\nDone! LeRobot dataset written to: {output_dir}")
     print(f"  Episodes: 1")
     print(f"  Frames: {len(merged)}")
-    print(f"  Sensors: pose, imu, gps, magnetometer, barometer, video")
+    sensors = ["pose", "imu", "gps", "magnetometer", "barometer", "video"]
+    if ugv:
+        sensors.append("ugv")
+    print(f"  Sensors: {', '.join(sensors)}")
+    if ugv:
+        print(f"  UGV telemetry rows: {len(ugv)} (IMU: {len(ugv_imu)}, chassis: {len(ugv_chassis)})")
     if ble:
         print(f"  BLE telemetry rows: {len(ble)} (raw, not interpolated)")
 

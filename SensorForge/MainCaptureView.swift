@@ -3,10 +3,12 @@ import SwiftUI
 struct MainCaptureView: View {
     @ObservedObject var engine: CaptureEngine
     @ObservedObject var ble: BLEBridge
+    @ObservedObject var ugv: WiFiBridge
     @StateObject private var countdown = CountdownStarter()
     @State private var selectedDelay: Int = 0
     @State private var showBLESheet = false
     @State private var showShareSheet = false
+    @State private var showUGVSheet = false
 
     private let delays = [0, 10, 30, 60]
 
@@ -37,6 +39,7 @@ struct MainCaptureView: View {
         .background(Color.black)
         .preferredColorScheme(.dark)
         .sheet(isPresented: $showBLESheet) { BLEPairingView(ble: ble) }
+        .sheet(isPresented: $showUGVSheet) { ugvConnectionSheet }
         .sheet(isPresented: $showShareSheet) { shareSheet }
         .onReceive(NotificationCenter.default.publisher(for: .siriStartRecording)) { _ in
             if !engine.isRecording { startCapture() }
@@ -56,6 +59,7 @@ struct MainCaptureView: View {
             SensorTile(label: "BARO", active: engine.baroActive, icon: "barometer")
             SensorTile(label: "AUDIO", active: engine.audioActive, icon: "waveform")
             SensorTile(label: "BLE", active: ble.connectedDevice != nil, icon: "antenna.radiowaves.left.and.right")
+            SensorTile(label: "UGV", active: ugv.isConnected, icon: "car.fill")
         }
     }
 
@@ -105,6 +109,10 @@ struct MainCaptureView: View {
                 if ble.isLogging {
                     StatRow(label: "BLE msgs", value: "\(ble.messageCount)")
                 }
+                if ugv.isLogging {
+                    StatRow(label: "UGV msgs", value: "\(ugv.messageCount)")
+                    StatRow(label: "Battery", value: String(format: "%.1fV", ugv.batteryVoltage))
+                }
             }
             .padding()
             .background(Color.white.opacity(0.05))
@@ -129,6 +137,14 @@ struct MainCaptureView: View {
                 HStack(spacing: 4) {
                     Image(systemName: device.type.icon)
                     Text(device.name)
+                }
+                .font(.caption)
+                .foregroundColor(.green)
+            }
+            if ugv.isConnected {
+                HStack(spacing: 4) {
+                    Image(systemName: "car.fill")
+                    Text("UGV @ \(ugv.hostAddress)")
                 }
                 .font(.caption)
                 .foregroundColor(.green)
@@ -159,16 +175,28 @@ struct MainCaptureView: View {
             }
 
             // Start / Stop button
-            HStack(spacing: 24) {
+            HStack(spacing: 20) {
                 // BLE button
                 Button {
                     showBLESheet = true
                 } label: {
                     Image(systemName: "antenna.radiowaves.left.and.right")
                         .font(.title2)
-                        .frame(width: 56, height: 56)
+                        .frame(width: 50, height: 50)
                         .background(ble.connectedDevice != nil ? Color.green.opacity(0.2) : Color.white.opacity(0.1))
                         .foregroundColor(ble.connectedDevice != nil ? .green : .gray)
+                        .clipShape(Circle())
+                }
+
+                // UGV button
+                Button {
+                    showUGVSheet = true
+                } label: {
+                    Image(systemName: "car.fill")
+                        .font(.title2)
+                        .frame(width: 50, height: 50)
+                        .background(ugv.isConnected ? Color.green.opacity(0.2) : Color.white.opacity(0.1))
+                        .foregroundColor(ugv.isConnected ? .green : .gray)
                         .clipShape(Circle())
                 }
 
@@ -239,6 +267,74 @@ struct MainCaptureView: View {
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button("Done") { showShareSheet = false }
+                }
+            }
+        }
+    }
+
+    // MARK: - UGV Connection Sheet
+
+    @State private var ugvIPInput: String = "192.168.4.1"
+
+    private var ugvConnectionSheet: some View {
+        NavigationStack {
+            VStack(spacing: 24) {
+                if ugv.isConnected {
+                    // Connected state
+                    VStack(spacing: 16) {
+                        Image(systemName: "car.fill")
+                            .font(.system(size: 48))
+                            .foregroundColor(.green)
+                        Text("Connected")
+                            .font(.headline)
+                            .foregroundColor(.green)
+                        VStack(spacing: 8) {
+                            StatRow(label: "Address", value: ugv.hostAddress)
+                            StatRow(label: "Telemetry", value: String(format: "%.0f msg/s", ugv.telemetryRate))
+                            StatRow(label: "Battery", value: String(format: "%.1fV", ugv.batteryVoltage))
+                            StatRow(label: "Messages", value: "\(ugv.messageCount)")
+                        }
+                        .padding()
+                        .background(Color.white.opacity(0.05))
+                        .cornerRadius(12)
+
+                        Button("Disconnect") {
+                            ugv.disconnect()
+                        }
+                        .foregroundColor(.red)
+                    }
+                } else {
+                    // Disconnected state — IP entry
+                    VStack(spacing: 16) {
+                        Image(systemName: "car.fill")
+                            .font(.system(size: 48))
+                            .foregroundColor(.gray)
+                        Text("Connect to UGV")
+                            .font(.headline)
+                        Text("Enter the IP address of your Waveshare UGV.\nDefault: 192.168.4.1 (UGV hotspot)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+
+                        TextField("IP Address", text: $ugvIPInput)
+                            .textFieldStyle(.roundedBorder)
+                            .keyboardType(.decimalPad)
+                            .frame(maxWidth: 200)
+
+                        Button("Connect") {
+                            ugv.hostAddress = ugvIPInput
+                            ugv.connect()
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+            }
+            .padding()
+            .navigationTitle("UGV")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Done") { showUGVSheet = false }
                 }
             }
         }

@@ -22,6 +22,7 @@ final class CaptureEngine: NSObject, ObservableObject {
     @Published var depthActive = false
     @Published var baroActive = false
     @Published var audioActive = false
+    @Published var ugvActive = false
 
     // MARK: - Thread-Safe Recording Flag
 
@@ -73,6 +74,7 @@ final class CaptureEngine: NSObject, ObservableObject {
     private var clock: SyncClock!
     private var durationTimer: Timer?
     private var bleBridge: BLEBridge?
+    private var wifiBridge: WiFiBridge?
 
     // MARK: - Queues
 
@@ -90,6 +92,10 @@ final class CaptureEngine: NSObject, ObservableObject {
 
     func setBLEBridge(_ bridge: BLEBridge) {
         self.bleBridge = bridge
+    }
+
+    func setWiFiBridge(_ bridge: WiFiBridge) {
+        self.wifiBridge = bridge
     }
 
     // MARK: - Start Recording
@@ -124,8 +130,12 @@ final class CaptureEngine: NSObject, ObservableObject {
         // Open CSV files
         openCSVFiles(in: dir)
 
-        // Set BLE bridge output
+        // Set bridge outputs
         bleBridge?.setOutputDirectory(dir)
+        if wifiBridge?.isConnected == true {
+            wifiBridge?.setOutputDirectory(dir)
+            DispatchQueue.main.async { self.ugvActive = true }
+        }
 
         // Start all sensors
         startARSession()
@@ -199,8 +209,9 @@ final class CaptureEngine: NSObject, ObservableObject {
         // 7. Write session metadata
         writeSessionMetadata()
 
-        // 8. Stop BLE logging
+        // 8. Stop BLE and WiFi logging
         bleBridge?.stopLogging()
+        wifiBridge?.stopLogging()
 
         // 9. Reset published state
         DispatchQueue.main.async {
@@ -209,6 +220,7 @@ final class CaptureEngine: NSObject, ObservableObject {
             self.depthActive = false
             self.baroActive = false
             self.audioActive = false
+            self.ugvActive = false
         }
     }
 
