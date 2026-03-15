@@ -293,16 +293,6 @@ final class CaptureEngine: NSObject, ObservableObject {
     // MARK: - CSV File Management
 
     private func openCSVFiles(in dir: URL) {
-        let files: [(String, String, inout FileHandle?)] = [
-            ("imu.csv", "timestamp_ns,ax,ay,az,gx,gy,gz,gravx,gravy,gravz,qx,qy,qz,qw\n", &imuHandle),
-            ("gps.csv", "timestamp_ns,lat,lon,alt,hacc,vacc,speed,course\n", &gpsHandle),
-            ("magnetometer.csv", "timestamp_ns,mx,my,mz\n", &magHandle),
-            ("barometer.csv", "timestamp_ns,pressure_kpa,rel_alt_m\n", &baroHandle),
-            ("poses.csv", "timestamp_ns,x,y,z,qx,qy,qz,qw,pitch,yaw,roll,tracking\n", &poseHandle),
-            ("surfaces.jsonl", "", &surfaceHandle),
-        ]
-
-        // We can't use inout with tuples in a loop, so do them individually
         createCSV(dir, "imu.csv", "timestamp_ns,ax,ay,az,gx,gy,gz,gravx,gravy,gravz,qx,qy,qz,qw\n", &imuHandle)
         createCSV(dir, "gps.csv", "timestamp_ns,lat,lon,alt,hacc,vacc,speed,course\n", &gpsHandle)
         createCSV(dir, "magnetometer.csv", "timestamp_ns,mx,my,mz\n", &magHandle)
@@ -497,7 +487,15 @@ extension CaptureEngine: ARSessionDelegate {
         let transform = frame.camera.transform
         let pos = transform.columns.3
         let euler = frame.camera.eulerAngles
-        let q = simd_quatf(transform)
+        let col0 = transform.columns.0
+        let col1 = transform.columns.1
+        let col2 = transform.columns.2
+        let rotMatrix = simd_float3x3(
+            simd_float3(col0.x, col0.y, col0.z),
+            simd_float3(col1.x, col1.y, col1.z),
+            simd_float3(col2.x, col2.y, col2.z)
+        )
+        let q = simd_quatf(rotMatrix)
         let trackingState: String
         switch frame.camera.trackingState {
         case .normal: trackingState = "normal"
@@ -511,7 +509,7 @@ extension CaptureEngine: ARSessionDelegate {
             }
         case .notAvailable: trackingState = "not_available"
         }
-        let poseLine = "\(t),\(pos.x),\(pos.y),\(pos.z),\(q.imag.x),\(q.imag.y),\(q.imag.z),\(q.real),\(euler.x),\(euler.y),\(euler.z),\(trackingState)\n"
+        let poseLine = "\(t),\(pos.x),\(pos.y),\(pos.z),\(q.vector.x),\(q.vector.y),\(q.vector.z),\(q.vector.w),\(euler.x),\(euler.y),\(euler.z),\(trackingState)\n"
         appendToHandle(poseHandle, poseLine)
 
         // --- LiDAR depth ---

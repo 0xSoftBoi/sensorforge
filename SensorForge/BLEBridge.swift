@@ -437,7 +437,10 @@ extension BLEBridge: CBPeripheralDelegate {
             }
         }
 
-        connectedDevice?.characteristicCount = count
+        if var device = connectedDevice {
+            device.characteristicCount = count
+            connectedDevice = device
+        }
         connectionState = .connected(deviceName: peripheral.name ?? "Device")
     }
 
@@ -451,7 +454,10 @@ extension BLEBridge: CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didReadRSSI RSSI: NSNumber, error: Error?) {
         guard error == nil else { return }
         DispatchQueue.main.async {
-            self.connectedDevice?.rssi = RSSI.intValue
+            if var device = self.connectedDevice {
+                device.rssi = RSSI.intValue
+                self.connectedDevice = device
+            }
         }
     }
 }
