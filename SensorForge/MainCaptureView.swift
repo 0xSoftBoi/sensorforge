@@ -36,7 +36,7 @@ struct MainCaptureView: View {
         }
         .background(Color.black)
         .preferredColorScheme(.dark)
-        .sheet(isPresented: $showBLESheet) { bleSheet }
+        .sheet(isPresented: $showBLESheet) { BLEPairingView(ble: ble) }
         .sheet(isPresented: $showShareSheet) { shareSheet }
         .onReceive(NotificationCenter.default.publisher(for: .siriStartRecording)) { _ in
             if !engine.isRecording { startCapture() }
@@ -121,7 +121,7 @@ struct MainCaptureView: View {
                 .foregroundColor(.gray)
             if let device = ble.connectedDevice {
                 HStack(spacing: 4) {
-                    Image(systemName: "antenna.radiowaves.left.and.right")
+                    Image(systemName: device.type.icon)
                     Text(device.name)
                 }
                 .font(.caption)
@@ -205,60 +205,6 @@ struct MainCaptureView: View {
                 }
                 .disabled(engine.isRecording || engine.lastSessionURL == nil)
             }
-        }
-    }
-
-    // MARK: - BLE Sheet
-
-    private var bleSheet: some View {
-        NavigationView {
-            List {
-                if ble.isScanning {
-                    HStack {
-                        ProgressView()
-                        Text("Scanning...")
-                            .foregroundColor(.secondary)
-                    }
-                }
-
-                if let connected = ble.connectedDevice {
-                    Section("Connected") {
-                        HStack {
-                            Text(connected.name)
-                            Spacer()
-                            Button("Disconnect") {
-                                ble.disconnect()
-                            }
-                            .foregroundColor(.red)
-                        }
-                    }
-                }
-
-                Section("Nearby Devices") {
-                    ForEach(ble.discoveredDevices) { device in
-                        Button {
-                            ble.connect(to: device)
-                            showBLESheet = false
-                        } label: {
-                            Text(device.name)
-                                .foregroundColor(.primary)
-                        }
-                    }
-                }
-            }
-            .navigationTitle("BLE Devices")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button("Done") { showBLESheet = false }
-                }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(ble.isScanning ? "Stop" : "Scan") {
-                        if ble.isScanning { ble.stopScan() } else { ble.startScan() }
-                    }
-                }
-            }
-            .onAppear { ble.startScan() }
         }
     }
 
