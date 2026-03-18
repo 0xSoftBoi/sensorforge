@@ -1,0 +1,27 @@
+[Unit]
+Description=Jetson Voice Assistant
+After=network.target ollama.service
+Wants=ollama.service
+Conflicts=jetson-capture-audio.service
+
+[Service]
+Type=simple
+User=jetson
+Group=jetson
+WorkingDirectory=/home/jetson/scripts
+ExecStart=/usr/bin/python3 /home/jetson/scripts/voice_assistant.py
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+Environment=HOME=/home/jetson
+Environment=PATH=/home/jetson/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+# Audio device access
+SupplementaryGroups=audio
+
+# Resource limits
+MemoryMax=512M
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target

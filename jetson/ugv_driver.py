@@ -1,0 +1,194 @@
+"""
+Waveshare UGV Serial Driver — JSON commands to ESP32 lower controller.
+
+Protocol: Send JSON lines like {"L":128,"R":128} over serial at 115200 baud.
+The ESP32 has a ~3s heartbeat timeout — if no command arrives, motors stop.
+This driver maintains a keepalive thread to prevent unexpected stops.
+
+Speed range: -255 (full reverse) to 255 (full forward) per motor.
+"""
+
+import json
+import logging
+import threading
+import time
+
+log = logging.getLogger(__name__)
+
+# Safety limits
+MAX_SPEED = 128          # Half of 255 max — safe for indoor use
+MAX_DURATION = 5.0       # Max seconds per single movement command
+HEARTBEAT_INTERVAL = 2.0 # Seconds between keepalive commands
+
+
+class UGVDriver:
+    """Waveshare UGV serial driver — JSON motor commands to ESP32."""
+
+    def __init__(self, port="/dev/ttyACM0", baud=115200):
+        import serial
+        self.serial = serial.Serial(port, baud, timeout=1)
+        time.sleep(0.5)  # ESP32 reset delay
+        self._drain_rx()
+
+        self._running = True
+        self._heartbeat = threading.Thread(
+            target=self._heartbeat_loop, daemon=True,
+        )
+        self._heartbeat.start()
+        self._lock = threading.Lock()
+        log.info(f"UGV driver connected: {port}@{baud}")
+
+    def _drain_rx(self):
+        """Read and discard any buffered data from ESP32."""
+        while self.serial.in_waiting:
+            self.serial.readline()
+
+    def _heartbeat_loop(self):
+        """Send stop commands every 2s to maintain connection (ESP32 auto-stops after ~3s)."""
+        while self._running:
+            time.sleep(HEARTBEAT_INTERVAL)
+            if self._running:
+                try:
+                    self._send_raw({"L": 0, "R": 0})
+                except Exception:
+                    pass
+
+    def _send_raw(self, cmd):
+        """Send a JSON command to the ESP32."""
+        with self._lock:
+            line = json.dumps(cmd) + "\n"
+            self.serial.write(line.encode())
+            self.serial.flush()
+
+    def _read_response(self, timeout=0.5):
+        """Read a line from ESP32 (if any)."""
+        self.serial.timeout = timeout
+        try:
+            line = self.serial.readline().decode().strip()
+            if line:
+                return json.loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
+        return None
+
+    # ─── Movement Primitives ────────────────────────────────────
+
+    def move(self, left_speed, right_speed):
+        """Set motor speeds. Range: -255 to 255 per side."""
+        left_speed = max(-MAX_SPEED, min(MAX_SPEED, int(left_speed)))
+        right_speed = max(-MAX_SPEED, min(MAX_SPEED, int(right_speed)))
+        self._send_raw({"L": left_speed, "R": right_speed})
+
+    def forward(self, speed=100, duration=1.0):
+        """Drive forward for duration seconds."""
+        speed = min(abs(speed), MAX_SPEED)
+        duration = min(duration, MAX_DURATION)
+        self.move(speed, speed)
+        time.sleep(duration)
+        self.stop()
+
+    def backward(self, speed=100, duration=1.0):
+        """Drive backward for duration seconds."""
+        speed = min(abs(speed), MAX_SPEED)
+        duration = min(duration, MAX_DURATION)
+        self.move(-speed, -speed)
+        time.sleep(duration)
+        self.stop()
+
+    def turn_left(self, speed=80, duration=0.5):
+        """Turn left in place (right motor forward, left motor backward)."""
+        speed = min(abs(speed), MAX_SPEED)
+        duration = min(duration, MAX_DURATION)
+        self.move(-speed, speed)
+        time.sleep(duration)
+        self.stop()
+
+    def turn_right(self, speed=80, duration=0.5):
+        """Turn right in place (left motor forward, right motor backward)."""
+        speed = min(abs(speed), MAX_SPEED)
+        duration = min(duration, MAX_DURATION)
+        self.move(speed, -speed)
+        time.sleep(duration)
+        self.stop()
+
+    def stop(self):
+        """Immediate stop."""
+        self._send_raw({"L": 0, "R": 0})
+
+    # ─── Sensor Reads ───────────────────────────────────────────
+
+    def get_imu(self):
+        """Request IMU data from ESP32 (if supported)."""
+        self._send_raw({"cmd": "imu"})
+        return self._read_response(timeout=1.0)
+
+    def get_battery(self):
+        """Request battery voltage from ESP32 (if supported)."""
+        self._send_raw({"cmd": "battery"})
+        return self._read_response(timeout=1.0)
+
+    def get_status(self):
+        """Get combined robot status string."""
+        parts = []
+        batt = self.get_battery()
+        if batt and isinstance(batt, dict):
+            voltage = batt.get("voltage", batt.get("v"))
+            if voltage:
+                parts.append(f"Battery: {voltage}V")
+        imu = self.get_imu()
+        if imu and isinstance(imu, dict):
+            parts.append(f"IMU: {imu}")
+        return ". ".join(parts) if parts else "Robot connected (no sensor data available)"
+
+    # ─── Lifecycle ──────────────────────────────────────────────
+
+    def close(self):
+        """Shutdown: stop motors and close serial."""
+        self._running = False
+        try:
+            self.stop()
+            self.serial.close()
+        except Exception:
+            pass
+        log.info("UGV driver closed")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    @staticmethod
+    def probe(port="/dev/ttyACM0", baud=115200):
+        """Test serial connection. Returns (success, info_string)."""
+        try:
+            import serial
+        except ImportError:
+            return False, "pyserial not installed (pip install pyserial)"
+        try:
+            s = serial.Serial(port, baud, timeout=2)
+            time.sleep(0.5)
+            # Drain startup messages
+            startup = []
+            while s.in_waiting:
+                line = s.readline().decode(errors="replace").strip()
+                if line:
+                    startup.append(line)
+            # Send stop command (safe)
+            s.write(json.dumps({"L": 0, "R": 0}).encode() + b"\n")
+            time.sleep(0.5)
+            # Read response
+            responses = []
+            while s.in_waiting:
+                line = s.readline().decode(errors="replace").strip()
+                if line:
+                    responses.append(line)
+            s.close()
+            info = f"Port: {port}@{baud}"
+            if startup:
+                info += f" | Startup: {startup}"
+            if responses:
+                info += f" | Response: {responses}"
+            return True, info
+        except Exception as e:
+            return False, f"Failed: {e}"
