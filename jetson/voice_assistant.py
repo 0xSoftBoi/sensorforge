@@ -1234,8 +1234,19 @@ def query_ollama(prompt, sentence_cb=None):
     if len(conversation_history) > MAX_HISTORY * 2:
         conversation_history = conversation_history[-MAX_HISTORY * 2:]
 
+    # Enrich system prompt with LORE context if available
+    enriched_prompt = SYSTEM_PROMPT
+    try:
+        from lore_store import LoreStore
+        lore_store = LoreStore()
+        lore_context = lore_store.get_for_llm_context(limit=5)
+        if lore_context:
+            enriched_prompt += "\n\n" + lore_context
+    except Exception:
+        pass
+
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": enriched_prompt},
         *conversation_history,
     ]
 
@@ -1389,6 +1400,14 @@ def query_vision(prompt, sentence_cb=None):
             if conversation_store:
                 conversation_store.save_message("user", f"[vision] {user_prompt}")
                 conversation_store.save_message("assistant", result)
+            # Also inject into Qualia SHM via unified vision service
+            try:
+                from gemini_vision import _inject_into_qualia
+                _inject_into_qualia(
+                    {"scene": result, "activity": "", "objects": []}, []
+                )
+            except Exception:
+                pass
             return result
         log.warning("Gemini vision failed, falling back to metadata")
 
