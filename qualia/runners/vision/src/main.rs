@@ -8,11 +8,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 /// How often to call Gemini API (seconds).
 /// Override with QUALIA_LLM_INTERVAL env var.
-const LLM_INTERVAL_SECS_DEFAULT: u64 = 30;
+const LLM_INTERVAL_SECS_DEFAULT: u64 = 300;
 
 /// Maximum LLM calls per session. After this, fall back to offline.
 /// Override with QUALIA_LLM_MAX_CALLS env var.
-const LLM_MAX_CALLS_DEFAULT: u64 = 50;
+const LLM_MAX_CALLS_DEFAULT: u64 = 10;
 
 /// Capture resolution for LLM (higher than the 8x8 sensor feed).
 const CAPTURE_W: u32 = 640;
