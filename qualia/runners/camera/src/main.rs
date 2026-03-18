@@ -38,8 +38,17 @@ fn main() {
     // Try ffmpeg first, fall back to synthetic data
     match start_ffmpeg() {
         Ok(mut child) => {
+            let stderr_pipe = child.stderr.take();
             let stdout = child.stdout.take().expect("ffmpeg stdout");
             run_camera_loop(&writer, stdout);
+            // Log ffmpeg stderr to understand why stream ended
+            if let Some(mut stderr) = stderr_pipe {
+                let mut err_buf = String::new();
+                let _ = stderr.read_to_string(&mut err_buf);
+                if !err_buf.is_empty() {
+                    eprintln!("qualia-camera: ffmpeg stderr: {}", err_buf.trim());
+                }
+            }
             let _ = child.kill();
             // ffmpeg stream ended (device busy, unplugged, etc) — fall through to synthetic
             eprintln!("qualia-camera: ffmpeg stream ended, switching to synthetic...");
