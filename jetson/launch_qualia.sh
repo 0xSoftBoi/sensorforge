@@ -65,7 +65,9 @@ trap cleanup SIGINT SIGTERM
 
 # ── 5. Launch qualia-watch (Rust TUI supervisor) ─────────────────
 cd "$REPO_DIR/qualia"
+export QUALIA_HEADLESS="${QUALIA_HEADLESS:-1}"
 echo "Starting qualia-watch (7-layer stack + camera + vision + agent)..."
+echo "  Headless: $QUALIA_HEADLESS (set QUALIA_HEADLESS=0 for TUI)"
 cargo run --release -p qualia-watch &
 WATCH_PID=$!
 PIDS+=($WATCH_PID)

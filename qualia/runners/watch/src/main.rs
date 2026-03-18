@@ -115,6 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shm_name = std::env::var("QUALIA_SHM_NAME").unwrap_or_else(|_| "/qualia_body".into());
     let sock_path = std::env::var("QUALIA_SOCK_PATH")
         .unwrap_or_else(|_| "/tmp/qualia_body.sock".to_string());
+    let headless = std::env::var("QUALIA_HEADLESS").map(|v| v == "1").unwrap_or(false);
 
     // ── Supervisor: create SHM and spawn runners ──
     cleanup_stale_shm(&shm_name);
@@ -131,6 +132,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let children = spawn_runners(&shm_name);
+
+    if headless {
+        return run_headless(shm, children, sock_path);
+    }
 
     // ── TUI setup ──
     enable_raw_mode()?;
@@ -236,6 +241,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     shutdown_children(&mut app.children);
     let _ = std::fs::remove_file(&sock_path);
     // shm drops automatically (owner=true unlinks)
+    Ok(())
+}
+
+fn run_headless(
+    shm: ShmRegion,
+    mut children: Vec<(String, Child)>,
+    sock_path: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    eprintln!("qualia-watch: headless mode (QUALIA_HEADLESS=1)");
+    eprintln!("qualia-watch: spawned {} runners", children.len());
+
+    let mut tick: u64 = 0;
+    while RUNNING.load(Ordering::Relaxed) {
+        std::thread::sleep(Duration::from_secs(5));
+        tick += 1;
+
+        // Print layer VFE summary every 5s
+        let mut vfes = Vec::new();
+        for i in 0..NUM_LAYERS {
+            let slot = shm.layer_slot(i);
+            let reader = LayerReader::new(slot);
+            let belief = reader.read();
+            vfes.push(format!("L{}={:.4}", i, belief.vfe));
+        }
+        eprintln!("qualia-watch [{}]: {}", tick * 5, vfes.join(" "));
+
+        // Check for dead children
+        for (name, child) in children.iter_mut() {
+            if let Ok(Some(status)) = child.try_wait() {
+                eprintln!("qualia-watch: {} exited with {}", name, status);
+            }
+        }
+    }
+
+    shutdown_children(&mut children);
+    let _ = std::fs::remove_file(&sock_path);
     Ok(())
 }
 
