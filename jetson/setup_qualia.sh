@@ -65,7 +65,7 @@ fi
 
 # ── 4. Build dependencies ────────────────────────────────────────
 echo "Installing build dependencies..."
-sudo apt-get update -qq
+sudo apt-get update -qq 2>/dev/null || echo "apt-get update had warnings (stale repos?) — continuing"
 sudo apt-get install -y -qq pkg-config libssl-dev build-essential git
 
 # ── 5. Clone or update repo ──────────────────────────────────────
@@ -80,10 +80,13 @@ else
 fi
 
 # ── 6. Build ─────────────────────────────────────────────────────
+cd "$REPO_DIR/qualia"
 echo "Building qualia-cuda (limited to -j2 for 4GB RAM)..."
 cargo build -j2 --release -p qualia-cuda
 
+echo "Building qualia-l0-superposition with CUDA backend..."
+cargo build -j2 --release -p qualia-l0-superposition --no-default-features --features cuda
+
 echo ""
 echo "=== Build complete ==="
-echo "Next: cargo build -j2 --release -p qualia-l0-superposition --no-default-features --features cuda"
-echo "Then: cargo run -p qualia-watch"
+echo "Run: cd $REPO_DIR/qualia && cargo run -p qualia-watch"
