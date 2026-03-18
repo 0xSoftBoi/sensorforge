@@ -938,6 +938,7 @@ dependencies = [
  "cudarc",
  "qualia-shm",
  "qualia-types",
+ "signal-hook",
 ]
 
 [[package]]

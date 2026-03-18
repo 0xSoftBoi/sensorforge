@@ -48,6 +48,12 @@ if [ -x /usr/bin/nvidia-cuda-mps-control ]; then
     nvidia-cuda-mps-control -d 2>/dev/null && echo "CUDA MPS daemon started" || echo "WARNING: CUDA MPS failed to start (non-fatal)"
 fi
 
+# ── 1d. Stop conflicting camera services ────────────────────────
+if systemctl is-active --quiet jetson-capture-images 2>/dev/null; then
+    echo "Stopping jetson-capture-images (conflicts with qualia-camera)..."
+    sudo systemctl stop jetson-capture-images
+fi
+
 # ── 1c. Checkpoint directory for weight persistence ─────────────
 export QUALIA_CHECKPOINT_DIR="${QUALIA_CHECKPOINT_DIR:-$HOME/training-data/checkpoints}"
 mkdir -p "$QUALIA_CHECKPOINT_DIR"

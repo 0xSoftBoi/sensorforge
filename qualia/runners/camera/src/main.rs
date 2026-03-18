@@ -41,6 +41,8 @@ fn main() {
             let stdout = child.stdout.take().expect("ffmpeg stdout");
             run_camera_loop(&writer, stdout);
             let _ = child.kill();
+            // ffmpeg stream ended (device busy, unplugged, etc) — fall through to synthetic
+            eprintln!("qualia-camera: ffmpeg stream ended, switching to synthetic...");
         }
         Err(e) => {
             eprintln!("qualia-camera: ffmpeg not available ({e})");
@@ -49,10 +51,12 @@ fn main() {
             } else {
                 eprintln!("qualia-camera: install with: sudo apt install ffmpeg");
             }
-            eprintln!("qualia-camera: falling back to synthetic sensor data...");
-            run_synthetic_loop(&writer);
         }
     }
+
+    // Always fall through to synthetic if we get here
+    eprintln!("qualia-camera: falling back to synthetic sensor data...");
+    run_synthetic_loop(&writer);
 }
 
 fn start_ffmpeg() -> Result<std::process::Child, std::io::Error> {

@@ -267,10 +267,47 @@ fn run_headless(
         }
         eprintln!("qualia-watch [{}]: {}", tick * 5, vfes.join(" "));
 
-        // Check for dead children
-        for (name, child) in children.iter_mut() {
+        // Check for dead children and respawn camera if needed
+        let mut respawn_camera = false;
+        children.retain_mut(|(name, child)| {
             if let Ok(Some(status)) = child.try_wait() {
                 eprintln!("qualia-watch: {} exited with {}", name, status);
+                if name == "qualia-camera" {
+                    respawn_camera = true;
+                }
+                return false; // remove dead child
+            }
+            true
+        });
+
+        if respawn_camera {
+            eprintln!("qualia-watch: respawning qualia-camera...");
+            let self_path = std::env::current_exe().expect("Cannot get self path");
+            let bin_dir = self_path.parent().expect("Cannot get bin dir");
+            let bin_path = bin_dir.join("qualia-camera");
+            let shm_name = std::env::var("QUALIA_SHM_NAME")
+                .unwrap_or_else(|_| "/qualia_body".to_string());
+            let log_path = "/tmp/qualia-camera.log";
+            let log_stderr = std::fs::File::create(log_path)
+                .map(Stdio::from)
+                .unwrap_or_else(|_| Stdio::null());
+            let mut cmd = Command::new(&bin_path);
+            cmd.env("QUALIA_SHM_NAME", &shm_name)
+                .stdout(Stdio::null())
+                .stderr(log_stderr);
+            for key in &["CAMERA_DEVICE", "RUST_LOG"] {
+                if let Ok(val) = std::env::var(key) {
+                    cmd.env(key, val);
+                }
+            }
+            match cmd.spawn() {
+                Ok(child) => {
+                    eprintln!("qualia-watch: qualia-camera respawned (pid {})", child.id());
+                    children.push(("qualia-camera".to_string(), child));
+                }
+                Err(e) => {
+                    eprintln!("qualia-watch: failed to respawn qualia-camera: {}", e);
+                }
             }
         }
     }
@@ -336,10 +373,14 @@ fn spawn_runners(shm_name: &str) -> Vec<(String, Child)> {
     for name in RUNNER_NAMES {
         let bin_path = bin_dir.join(name);
         let mut cmd = Command::new(&bin_path);
+        let log_path = format!("/tmp/{}.log", name);
+        let log_stderr = std::fs::File::create(&log_path)
+            .map(Stdio::from)
+            .unwrap_or_else(|_| Stdio::null());
         cmd.env("QUALIA_SHM_NAME", shm_name)
             .env("RUST_LOG", &rust_log)
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stderr(log_stderr);
 
         // Pass through env vars that runners need
         for key in &[
