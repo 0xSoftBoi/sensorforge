@@ -314,10 +314,76 @@ def _send_message(conn: socket.socket, msg: dict):
     conn.sendall(data)
 
 
+# ── HTTP Status Server (for web dashboard) ──────────────────────
+
+HTTP_PORT = BRIDGE_PORT + 1  # 9877
+
+
+def run_http_status_server(port: int = HTTP_PORT):
+    """Lightweight HTTP server for the web dashboard to fetch robot telemetry."""
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/status":
+                qualia = get_qualia_status()
+                frame = sensor_store.get_latest()
+
+                status = {
+                    "iphone": {
+                        "connected": sensor_store.is_connected,
+                        "device": sensor_store.connected_device,
+                        "frames": sensor_store.frame_count,
+                        "latest": frame,
+                    },
+                    "qualia": {
+                        "active": qualia.active,
+                        "layers": [
+                            {"id": l.id, "vfe": l.vfe, "compression": l.compression, "challenged": l.challenged}
+                            for l in qualia.layers
+                        ],
+                        "scene": qualia.scene,
+                        "directive": qualia.directive,
+                    },
+                    "voice_state": "idle",
+                    "ugv": {"battery_v": 0.0, "moving": False},
+                }
+
+                body = json.dumps(status).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def do_OPTIONS(self):
+            self.send_response(200)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET")
+            self.end_headers()
+
+        def log_message(self, format, *args):
+            pass  # Suppress access logs
+
+    httpd = HTTPServer(("0.0.0.0", port), Handler)
+    log.info("HTTP status server on http://0.0.0.0:%d/status", port)
+    httpd.serve_forever()
+
+
 # ── Server ───────────────────────────────────────────────────────
 
 def run_server(port: int = BRIDGE_PORT, use_mdns: bool = True):
-    """Run the WiFi bridge TCP server."""
+    """Run the WiFi bridge TCP server + HTTP status server."""
+    # Start HTTP status server in background thread
+    http_thread = threading.Thread(
+        target=run_http_status_server, args=(port + 1,), daemon=True
+    )
+    http_thread.start()
+
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("0.0.0.0", port))

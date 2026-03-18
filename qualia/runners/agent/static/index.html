@@ -765,6 +765,29 @@ body {
       </div>
     </div>
   </div>
+
+  <!-- Robot-wide telemetry panels -->
+  <div class="panel robot-panel" style="margin-top:12px;">
+    <div class="panel-title">Robot Systems <span id="robotStatus" style="color:var(--text-dim);font-weight:400;font-size:11px;">polling...</span></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;">
+      <div>
+        <h3 style="color:var(--cyan);font-size:12px;margin-bottom:6px;">Voice Assistant</h3>
+        <div id="voiceState" style="font-size:16px;color:var(--green);">idle</div>
+      </div>
+      <div>
+        <h3 style="color:var(--orange);font-size:12px;margin-bottom:6px;">iPhone Sensors</h3>
+        <div id="iphoneStatus" style="font-size:12px;color:var(--text-dim);">disconnected</div>
+        <div id="iphoneFrames" style="font-size:11px;color:var(--text-dim);margin-top:2px;"></div>
+        <div id="iphoneIMU" style="font-size:11px;color:var(--text-dim);margin-top:2px;"></div>
+        <div id="iphoneGPS" style="font-size:11px;color:var(--text-dim);margin-top:2px;"></div>
+      </div>
+      <div>
+        <h3 style="color:var(--magenta);font-size:12px;margin-bottom:6px;">UGV Telemetry</h3>
+        <div id="ugvBattery" style="font-size:14px;color:var(--text-dim);">—</div>
+        <div id="ugvMotion" style="font-size:11px;color:var(--text-dim);margin-top:2px;">—</div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <div class="disconnected hidden" id="disconnected">
@@ -1493,6 +1516,78 @@ function drawVolDual(id, series1, series2) {
   ctx.stroke();
   ctx.globalAlpha = 1;
 }
+
+// ── Robot telemetry polling (WiFi bridge HTTP endpoint) ──
+const ROBOT_STATUS_URL = `http://${location.hostname}:9877/status`;
+let robotPollFails = 0;
+
+async function pollRobotStatus() {
+  try {
+    const resp = await fetch(ROBOT_STATUS_URL, {signal: AbortSignal.timeout(2000)});
+    if (!resp.ok) throw new Error('not ok');
+    const data = await resp.json();
+    robotPollFails = 0;
+    document.getElementById('robotStatus').textContent = 'connected';
+    document.getElementById('robotStatus').style.color = 'var(--green)';
+
+    // Voice state
+    const vs = data.voice_state || 'idle';
+    const vsEl = document.getElementById('voiceState');
+    vsEl.textContent = vs;
+    vsEl.style.color = vs === 'idle' ? 'var(--green)' :
+                        vs === 'listening' ? 'var(--cyan)' :
+                        vs === 'processing' ? 'var(--yellow)' :
+                        vs === 'speaking' ? 'var(--magenta)' : 'var(--text)';
+
+    // iPhone
+    const iphone = data.iphone || {};
+    const iphStatus = document.getElementById('iphoneStatus');
+    if (iphone.connected) {
+      iphStatus.textContent = iphone.device || 'connected';
+      iphStatus.style.color = 'var(--green)';
+      document.getElementById('iphoneFrames').textContent = `${iphone.frames || 0} frames`;
+
+      if (iphone.latest) {
+        const f = iphone.latest;
+        if (f.imu) {
+          const a = f.imu.accel || [0,0,0];
+          document.getElementById('iphoneIMU').textContent =
+            `IMU: ${a[0].toFixed(2)}, ${a[1].toFixed(2)}, ${a[2].toFixed(2)}`;
+        }
+        if (f.gps && f.gps.lat) {
+          document.getElementById('iphoneGPS').textContent =
+            `GPS: ${f.gps.lat.toFixed(5)}, ${f.gps.lon.toFixed(5)}`;
+        }
+      }
+    } else {
+      iphStatus.textContent = 'disconnected';
+      iphStatus.style.color = 'var(--text-dim)';
+      document.getElementById('iphoneFrames').textContent = '';
+      document.getElementById('iphoneIMU').textContent = '';
+      document.getElementById('iphoneGPS').textContent = '';
+    }
+
+    // UGV
+    const ugv = data.ugv || {};
+    document.getElementById('ugvBattery').textContent =
+      ugv.battery_v ? `${ugv.battery_v.toFixed(1)}V` : '—';
+    document.getElementById('ugvMotion').textContent =
+      ugv.moving ? 'MOVING' : 'stopped';
+    if (ugv.moving) {
+      document.getElementById('ugvMotion').style.color = 'var(--yellow)';
+    }
+
+  } catch (e) {
+    robotPollFails++;
+    if (robotPollFails > 3) {
+      document.getElementById('robotStatus').textContent = 'bridge offline';
+      document.getElementById('robotStatus').style.color = 'var(--text-dim)';
+    }
+  }
+}
+
+setInterval(pollRobotStatus, 2000);
+pollRobotStatus();
 
 init();
 </script>
