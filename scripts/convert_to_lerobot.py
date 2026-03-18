@@ -107,6 +107,12 @@ def convert_session(session_dir, output_dir):
     mag_interp = interpolate_to_timeline(mag, timeline_ns)
     baro_interp = interpolate_to_timeline(baro, timeline_ns)
 
+    # Read Qualia beliefs if present (exported by qualia_bridge)
+    qualia_beliefs = read_csv(session_dir / "qualia_beliefs.csv")
+
+    # Interpolate Qualia data to pose timeline
+    qualia_interp = interpolate_to_timeline(qualia_beliefs, timeline_ns) if qualia_beliefs else None
+
     # Merge into unified rows
     merged = []
     for i, t in enumerate(timeline_ns):
@@ -133,6 +139,11 @@ def convert_session(session_dir, output_dir):
         # Barometer
         for k, v in baro_interp[i].items():
             row[f"baro.{k}"] = v
+
+        # Qualia beliefs (7 layers x VFE + compression)
+        if qualia_interp and qualia_interp[i]:
+            for k, v in qualia_interp[i].items():
+                row[f"qualia.{k}"] = v
 
         merged.append(row)
 
@@ -244,9 +255,14 @@ def convert_session(session_dir, output_dir):
     print(f"\nDone! LeRobot dataset written to: {output_dir}")
     print(f"  Episodes: 1")
     print(f"  Frames: {len(merged)}")
-    print(f"  Sensors: pose, imu, gps, magnetometer, barometer, video")
+    sensors = ["pose", "imu", "gps", "magnetometer", "barometer", "video"]
+    if qualia_beliefs:
+        sensors.append("qualia")
+    print(f"  Sensors: {', '.join(sensors)}")
     if ble:
         print(f"  BLE telemetry rows: {len(ble)} (raw, not interpolated)")
+    if qualia_beliefs:
+        print(f"  Qualia belief rows: {len(qualia_beliefs)} (interpolated to timeline)")
 
 
 def main():
