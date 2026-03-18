@@ -40,9 +40,12 @@ fi
 
 # ── 1b. CUDA MPS (shares GPU context across layer processes) ────
 if [ -x /usr/bin/nvidia-cuda-mps-control ]; then
-    echo quit | nvidia-cuda-mps-control 2>/dev/null  # kill stale
-    nvidia-cuda-mps-control -d
-    echo "CUDA MPS daemon started"
+    export CUDA_MPS_PIPE_DIRECTORY="/tmp/nvidia-mps"
+    export CUDA_MPS_LOG_DIRECTORY="/tmp/nvidia-mps-log"
+    mkdir -p "$CUDA_MPS_PIPE_DIRECTORY" "$CUDA_MPS_LOG_DIRECTORY"
+    echo quit | nvidia-cuda-mps-control 2>/dev/null || true  # kill stale
+    sleep 0.5
+    nvidia-cuda-mps-control -d 2>/dev/null && echo "CUDA MPS daemon started" || echo "WARNING: CUDA MPS failed to start (non-fatal)"
 fi
 
 # ── 1c. Checkpoint directory for weight persistence ─────────────
@@ -73,7 +76,7 @@ cleanup() {
         kill "$pid" 2>/dev/null || true
     done
     wait 2>/dev/null
-    echo quit | nvidia-cuda-mps-control 2>/dev/null
+    echo quit | nvidia-cuda-mps-control 2>/dev/null || true
     echo "All processes stopped."
 }
 
