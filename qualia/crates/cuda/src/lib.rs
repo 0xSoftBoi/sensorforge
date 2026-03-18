@@ -5,26 +5,110 @@ use std::sync::Arc;
 
 const BELIEF_KERNEL_SRC: &str = include_str!("../../../kernels/belief_update.cu");
 
-/// Detect GPU compute capability for PTX compilation targeting.
-/// Fixes CUDA_ERROR_UNSUPPORTED_PTX_VERSION when toolkit > driver version.
-fn detect_gpu_arch(device: &Arc<CudaDevice>) -> Option<&'static str> {
-    if let Ok(arch) = std::env::var("QUALIA_CUDA_ARCH") {
-        return Some(Box::leak(arch.into_boxed_str()));
+/// Compile CUDA kernel to PTX, patching the ISA version if toolkit > driver.
+///
+/// NVRTC from toolkit 12.9 generates PTX with `.version 8.8` but the Jetson
+/// driver (540.4.0 = CUDA 12.6) only supports up to 8.5. The PTX content is
+/// compatible — only the version header is too new. We compile with NVRTC
+/// targeting the GPU's compute capability, then query the driver's max
+/// supported CUDA version and downgrade the PTX version header to match.
+fn compile_kernel(device: &Arc<CudaDevice>) -> Result<cudarc::nvrtc::Ptx, String> {
+    if let Ok(path) = std::env::var("QUALIA_PTX_FILE") {
+        eprintln!("qualia-cuda: loading pre-compiled PTX from {path}");
+        let src = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read PTX file {path}: {e}"))?;
+        return Ok(cudarc::nvrtc::Ptx::from_src(src));
     }
 
+    let (major, minor) = detect_gpu_arch(device);
+    let arch = format!("compute_{}{}", major, minor);
+
+    let opts = cudarc::nvrtc::CompileOptions {
+        arch: Some(Box::leak(arch.into_boxed_str())),
+        ..Default::default()
+    };
+    let ptx = cudarc::nvrtc::compile_ptx_with_opts(BELIEF_KERNEL_SRC, opts)
+        .map_err(|e| format!("NVRTC compile failed: {e}"))?;
+
+    // Patch PTX version header to match driver's supported ISA
+    let ptx_src = ptx.to_src();
+    let patched = patch_ptx_version(&ptx_src);
+    Ok(cudarc::nvrtc::Ptx::from_src(patched))
+}
+
+fn detect_gpu_arch(device: &Arc<CudaDevice>) -> (i32, i32) {
     use cudarc::driver::sys::CUdevice_attribute::*;
     let major = device
         .attribute(CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
-        .ok()?;
+        .unwrap_or(8);
     let minor = device
         .attribute(CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)
-        .ok()?;
-    let arch_str = format!("compute_{}{}", major, minor);
-    eprintln!(
-        "qualia-cuda: detected GPU compute_{}{}, targeting PTX for it",
-        major, minor
-    );
-    Some(Box::leak(arch_str.into_boxed_str()))
+        .unwrap_or(7);
+    eprintln!("qualia-cuda: detected GPU compute_{}{}", major, minor);
+    (major, minor)
+}
+
+/// Query the driver's CUDA version and compute the max PTX ISA it supports.
+/// Then rewrite the `.version X.Y` directive in the PTX source to match.
+fn patch_ptx_version(ptx_src: &str) -> String {
+    // Map CUDA driver version → max PTX ISA version
+    // https://docs.nvidia.com/cuda/parallel-thread-execution/#release-notes
+    let driver_ptx = driver_max_ptx_version();
+
+    if let Some(target) = driver_ptx {
+        // Find and replace the .version line
+        let mut result = String::with_capacity(ptx_src.len());
+        for line in ptx_src.lines() {
+            if line.starts_with(".version ") {
+                let orig = line.trim_start_matches(".version ").trim();
+                eprintln!(
+                    "qualia-cuda: patching PTX .version {} -> {} (driver limit)",
+                    orig, target
+                );
+                result.push_str(&format!(".version {}", target));
+            } else {
+                result.push_str(line);
+            }
+            result.push('\n');
+        }
+        result
+    } else {
+        eprintln!("qualia-cuda: could not query driver version, using PTX as-is");
+        ptx_src.to_string()
+    }
+}
+
+fn driver_max_ptx_version() -> Option<&'static str> {
+    // Allow override
+    if let Ok(v) = std::env::var("QUALIA_PTX_VERSION") {
+        return Some(Box::leak(v.into_boxed_str()));
+    }
+
+    // Query driver CUDA version via cuDriverGetVersion
+    let mut driver_ver: i32 = 0;
+    let rc = unsafe { cudarc::driver::sys::lib().cuDriverGetVersion(&mut driver_ver) };
+    if rc != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
+        return None;
+    }
+
+    // driver_ver format: major*1000 + minor*10 (e.g., 12060 = CUDA 12.6)
+    let cuda_major = driver_ver / 1000;
+    let cuda_minor = (driver_ver % 1000) / 10;
+    eprintln!("qualia-cuda: driver supports CUDA {}.{}", cuda_major, cuda_minor);
+
+    // CUDA version → max PTX ISA version mapping
+    let ptx_ver = match (cuda_major, cuda_minor) {
+        (12, 0) => "8.0",
+        (12, 1) => "8.1",
+        (12, 2) => "8.2",
+        (12, 3) => "8.3",
+        (12, 4) => "8.4",
+        (12, 5 | 6) => "8.5",
+        (12, 7 | 8) => "8.6",
+        (12, _) => "8.8",
+        _ => return None,
+    };
+    Some(ptx_ver)
 }
 
 pub struct LayerParams {
@@ -44,13 +128,7 @@ impl CudaContext {
     pub fn new(params: &LayerParams) -> Result<Self, String> {
         let device = CudaDevice::new(0).map_err(|e| format!("CUDA device init failed: {e}"))?;
 
-        let arch = detect_gpu_arch(&device);
-        let opts = cudarc::nvrtc::CompileOptions {
-            arch,
-            ..Default::default()
-        };
-        let ptx = cudarc::nvrtc::compile_ptx_with_opts(BELIEF_KERNEL_SRC, opts)
-            .map_err(|e| format!("NVRTC compile failed: {e}"))?;
+        let ptx = compile_kernel(&device)?;
         device
             .load_ptx(ptx, "belief", &["belief_update"])
             .map_err(|e| format!("PTX load failed: {e}"))?;
