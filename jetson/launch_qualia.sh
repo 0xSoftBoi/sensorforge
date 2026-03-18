@@ -54,6 +54,10 @@ if systemctl is-active --quiet jetson-capture-images 2>/dev/null; then
     sudo systemctl stop jetson-capture-images
 fi
 
+# Kill orphaned processes from previous runs
+pkill -f "qualia-watch|qualia-camera|session_recorder" 2>/dev/null || true
+sleep 1
+
 # ── 1c. Checkpoint directory for weight persistence ─────────────
 export QUALIA_CHECKPOINT_DIR="${QUALIA_CHECKPOINT_DIR:-$HOME/training-data/checkpoints}"
 mkdir -p "$QUALIA_CHECKPOINT_DIR"
@@ -110,6 +114,12 @@ fi
 
 # ── 7. Launch session recorder (if --record) ─────────────────────
 if [ "$RECORD" = true ]; then
+    # Wait for camera runner to create the snapshot file
+    echo "Waiting for camera snapshot..."
+    for i in $(seq 1 10); do
+        [ -f /tmp/qualia-camera-latest.jpg ] && break
+        sleep 1
+    done
     echo "Starting session recorder..."
     python3 "$SCRIPT_DIR/session_recorder.py" --camera "$CAMERA_DEVICE" &
     PIDS+=($!)

@@ -84,17 +84,38 @@ def sample_row(bridge):
 
 
 def start_video_recorder(output_path, camera_device="/dev/video0"):
-    """Start ffmpeg to record video from USB camera."""
-    cmd = [
-        "ffmpeg", "-y",
-        "-f", "v4l2",
-        "-video_size", "640x480",
-        "-i", camera_device,
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-crf", "23",
-        str(output_path),
-    ]
+    """Start ffmpeg to record video.
+
+    Reads from the snapshot JPEG that qualia-camera writes at ~1fps,
+    or falls back to direct V4L2 capture if the snapshot doesn't exist.
+    This avoids device conflicts with the camera runner.
+    """
+    snapshot = "/tmp/qualia-camera-latest.jpg"
+    if os.path.exists(snapshot):
+        # Use image2 demuxer to read the continuously-updated snapshot
+        cmd = [
+            "ffmpeg", "-y",
+            "-loop", "1",
+            "-framerate", "1",
+            "-i", snapshot,
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            str(output_path),
+        ]
+    else:
+        # Fallback: direct V4L2 (only works if camera runner isn't active)
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "v4l2",
+            "-video_size", "640x480",
+            "-i", camera_device,
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "23",
+            str(output_path),
+        ]
     return subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
