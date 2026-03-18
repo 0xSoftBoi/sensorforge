@@ -1,0 +1,10 @@
+[package]
+name = "qualia-cuda"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "cudarc wrapper, .cubin loading, stream management"
+
+[dependencies]
+qualia-types.workspace = true
+qualia-shm.workspace = true

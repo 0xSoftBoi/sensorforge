@@ -1,0 +1,18 @@
+[package]
+name = "qualia-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "qualia-agent"
+path = "src/main.rs"
+
+[dependencies]
+qualia-types = { workspace = true }
+qualia-shm = { workspace = true }
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tower-http = { version = "0.6", features = ["cors"] }
