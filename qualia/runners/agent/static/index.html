@@ -1,0 +1,1500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QUALIA ENGINE</title>
+<style>
+:root {
+  --bg: #0a0a0f;
+  --bg2: #12121a;
+  --bg3: #1a1a25;
+  --border: #2a2a3a;
+  --text: #c8c8d8;
+  --text-dim: #666680;
+  --cyan: #00d4ff;
+  --green: #00ff88;
+  --red: #ff4466;
+  --yellow: #ffcc00;
+  --magenta: #cc66ff;
+  --blue: #4488ff;
+  --orange: #ff8844;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+  font-size: 13px;
+  overflow-x: hidden;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, #0f0f18 0%, var(--bg) 100%);
+}
+
+.header h1 {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 3px;
+  color: var(--cyan);
+  text-shadow: 0 0 20px rgba(0,212,255,0.3);
+}
+
+.header .status {
+  display: flex;
+  gap: 20px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.header .status .live {
+  color: var(--green);
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.main {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: auto auto auto auto auto auto auto;
+  gap: 1px;
+  background: var(--border);
+  min-height: calc(100vh - 56px);
+}
+
+.panel {
+  background: var(--bg);
+  padding: 16px;
+  position: relative;
+}
+
+.panel-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--cyan);
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* ── Volatility Panel ── */
+.volatility-panel {
+  grid-column: 1 / 3;
+  grid-row: 3;
+}
+
+.vol-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 12px;
+}
+
+.vol-chart {
+  position: relative;
+}
+
+.vol-chart h4 {
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+.vol-chart canvas {
+  width: 100%;
+  height: 80px;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: var(--bg2);
+}
+
+.vol-chart .vol-legend {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 9px;
+  color: var(--text-dim);
+  flex-wrap: wrap;
+}
+
+.vol-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.vol-legend-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 1px;
+  display: inline-block;
+}
+
+/* ── Hierarchy Panel ── */
+.hierarchy { grid-column: 1; grid-row: 1 / 3; }
+
+.layer-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.layer-card {
+  display: grid;
+  grid-template-columns: 36px 1fr 100px 80px;
+  align-items: center;
+  padding: 8px 10px;
+  background: var(--bg2);
+  border-left: 3px solid var(--border);
+  border-radius: 2px;
+  cursor: pointer;
+  transition: all 0.15s;
+  position: relative;
+}
+
+.layer-card:hover { background: var(--bg3); }
+.layer-card.active { border-left-color: var(--cyan); background: var(--bg3); }
+.layer-card.challenging { border-left-color: var(--red); }
+.layer-card.escalating { border-left-color: var(--magenta); }
+
+.layer-id {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-dim);
+}
+
+.layer-info .layer-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.layer-info .layer-freq {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.layer-vfe {
+  text-align: right;
+  font-size: 14px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.layer-meta {
+  text-align: right;
+  font-size: 10px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+.vfe-good { color: var(--green); }
+.vfe-warn { color: var(--yellow); }
+.vfe-bad { color: var(--red); }
+
+/* Compression bar */
+.comp-bar {
+  display: inline-block;
+  width: 40px;
+  height: 4px;
+  background: var(--bg);
+  border-radius: 2px;
+  overflow: hidden;
+  vertical-align: middle;
+}
+.comp-bar-fill {
+  height: 100%;
+  background: var(--blue);
+  border-radius: 2px;
+  transition: width 0.3s;
+}
+
+/* Connection lines between layers */
+.layer-connector {
+  width: 2px;
+  height: 8px;
+  margin: 0 auto;
+  position: relative;
+}
+
+.layer-connector::before {
+  content: '';
+  position: absolute;
+  left: 17px;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  background: var(--border);
+}
+
+.layer-connector.active-flow::before {
+  background: var(--cyan);
+  box-shadow: 0 0 6px rgba(0,212,255,0.4);
+}
+
+/* ── Detail Panel ── */
+.detail { grid-column: 2; grid-row: 1; }
+
+.detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 10px;
+}
+
+.detail-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.stat-box {
+  background: var(--bg2);
+  padding: 8px 10px;
+  border-radius: 3px;
+}
+
+.stat-label {
+  font-size: 10px;
+  color: var(--text-dim);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.stat-value {
+  font-size: 16px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+
+/* Belief vector visualization */
+.belief-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.belief-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.belief-row-label {
+  width: 70px;
+  font-size: 10px;
+  color: var(--text-dim);
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.belief-heatmap {
+  display: flex;
+  gap: 0;
+  flex: 1;
+}
+
+.belief-cell {
+  width: 100%;
+  height: 14px;
+  flex: 1;
+  min-width: 0;
+}
+
+/* ── Weight Matrix ── */
+.weights { grid-column: 2; grid-row: 2; }
+
+.weight-canvas-wrap {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+#weightCanvas {
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  image-rendering: pixelated;
+}
+
+.weight-stats {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.8;
+}
+
+.weight-stats span { color: var(--text); font-weight: 600; }
+
+/* ── World Model ── */
+.world-panel { grid-column: 1 / 3; grid-row: 7; }
+
+.world-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 280px;
+  gap: 16px;
+}
+
+.world-section h3 {
+  font-size: 10px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--magenta);
+  margin-bottom: 6px;
+}
+
+.directive-text {
+  font-size: 13px;
+  color: var(--magenta);
+  font-weight: 600;
+  padding: 8px;
+  background: rgba(204,102,255,0.06);
+  border: 1px solid rgba(204,102,255,0.15);
+  border-radius: 3px;
+  margin-bottom: 10px;
+}
+
+.scene-text, .activity-text {
+  padding: 6px 8px;
+  background: var(--bg2);
+  border-radius: 3px;
+  margin-bottom: 8px;
+  line-height: 1.5;
+}
+
+.activity-text { color: var(--yellow); }
+
+.obj-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.obj-table th {
+  text-align: left;
+  font-size: 10px;
+  color: var(--text-dim);
+  letter-spacing: 1px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.obj-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid rgba(42,42,58,0.5);
+}
+
+.obj-conf-high { color: var(--green); }
+.obj-conf-mid { color: var(--yellow); }
+.obj-conf-low { color: var(--red); }
+
+#embeddingCanvas {
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  image-rendering: pixelated;
+}
+
+.world-stats {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 8px;
+  line-height: 1.6;
+}
+
+.world-stats span { color: var(--text); }
+
+/* ── Residual Sparklines ── */
+.residual-bars {
+  display: flex;
+  gap: 0;
+  height: 30px;
+  align-items: flex-end;
+  margin-top: 4px;
+}
+
+.residual-bar {
+  flex: 1;
+  min-width: 0;
+  border-radius: 1px 1px 0 0;
+  transition: height 0.2s;
+}
+
+/* ── VFE Sparkline ── */
+.sparkline-wrap {
+  height: 40px;
+  position: relative;
+  margin-top: 8px;
+}
+
+.sparkline-wrap canvas {
+  width: 100%;
+  height: 100%;
+}
+
+/* ── Thought Stream ── */
+.thought-panel {
+  grid-column: 1 / 3;
+  grid-row: 4;
+  max-height: 300px;
+}
+
+.thought-stream {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 260px;
+  overflow-y: auto;
+  scroll-behavior: smooth;
+}
+
+.thought-stream::-webkit-scrollbar { width: 4px; }
+.thought-stream::-webkit-scrollbar-track { background: var(--bg); }
+.thought-stream::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.thought {
+  display: flex;
+  gap: 10px;
+  padding: 6px 10px;
+  background: var(--bg2);
+  border-left: 3px solid var(--border);
+  border-radius: 2px;
+  animation: thought-in 0.3s ease-out;
+  align-items: flex-start;
+}
+
+@keyframes thought-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.thought.kind-observe { border-left-color: var(--cyan); }
+.thought.kind-predict { border-left-color: var(--blue); }
+.thought.kind-surprise { border-left-color: var(--red); }
+.thought.kind-learn { border-left-color: var(--yellow); }
+.thought.kind-resolve { border-left-color: var(--green); }
+.thought.kind-escalate { border-left-color: var(--magenta); }
+
+.thought-layer {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-dim);
+  min-width: 36px;
+  flex-shrink: 0;
+  padding-top: 1px;
+}
+
+.thought-text {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  flex: 1;
+}
+
+.thought-time {
+  font-size: 10px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+  padding-top: 2px;
+}
+
+.thought-kind {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.thought-kind.kind-observe { color: var(--cyan); background: rgba(0,212,255,0.1); }
+.thought-kind.kind-predict { color: var(--blue); background: rgba(68,136,255,0.1); }
+.thought-kind.kind-surprise { color: var(--red); background: rgba(255,68,102,0.1); }
+.thought-kind.kind-learn { color: var(--yellow); background: rgba(255,204,0,0.1); }
+.thought-kind.kind-resolve { color: var(--green); background: rgba(0,255,136,0.1); }
+.thought-kind.kind-escalate { color: var(--magenta); background: rgba(204,102,255,0.1); }
+
+/* ── Disconnected overlay ── */
+.disconnected {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(10,10,15,0.9);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.disconnected h2 {
+  color: var(--yellow);
+  font-size: 18px;
+  letter-spacing: 2px;
+}
+
+.disconnected p {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+/* ── Lore Codex ── */
+.lore-panel {
+  grid-column: 1 / 3;
+  grid-row: 6;
+}
+
+.lore-stream {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 280px;
+  overflow-y: auto;
+  scroll-behavior: smooth;
+}
+
+.lore-stream::-webkit-scrollbar { width: 4px; }
+.lore-stream::-webkit-scrollbar-track { background: var(--bg); }
+.lore-stream::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.lore-entry {
+  padding: 8px 12px;
+  background: var(--bg2);
+  border-left: 3px solid var(--magenta);
+  border-radius: 2px;
+  animation: thought-in 0.4s ease-out;
+}
+
+.lore-entry.reason-0 { border-left-color: var(--red); }
+.lore-entry.reason-1 { border-left-color: var(--yellow); }
+.lore-entry.reason-2 { border-left-color: var(--magenta); }
+
+.lore-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.lore-layer {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--cyan);
+}
+
+.lore-reason {
+  font-size: 9px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: 2px;
+  font-weight: 600;
+}
+
+.lore-reason.r-0 { color: var(--red); background: rgba(255,68,102,0.1); }
+.lore-reason.r-1 { color: var(--yellow); background: rgba(255,204,0,0.1); }
+.lore-reason.r-2 { color: var(--magenta); background: rgba(204,102,255,0.1); }
+
+.lore-question {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-style: italic;
+  margin-bottom: 4px;
+  line-height: 1.4;
+}
+
+.lore-answer {
+  font-size: 12px;
+  color: var(--text);
+  line-height: 1.5;
+  padding-left: 8px;
+  border-left: 2px solid var(--border);
+}
+
+.lore-meta {
+  font-size: 9px;
+  color: var(--text-dim);
+  margin-top: 4px;
+  display: flex;
+  gap: 12px;
+}
+
+.lore-count {
+  font-size: 12px;
+  color: var(--magenta);
+  font-weight: 700;
+  float: right;
+}
+
+.hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>QUALIA ENGINE</h1>
+  <div class="status">
+    <span id="connStatus" class="live">LIVE</span>
+    <span id="ledgerSeq">Ledger: 0</span>
+    <span id="fps">0 fps</span>
+  </div>
+</div>
+
+<div class="main">
+  <!-- Left: Layer hierarchy -->
+  <div class="panel hierarchy">
+    <div class="panel-title">Predictive Hierarchy</div>
+    <div class="layer-stack" id="layerStack"></div>
+  </div>
+
+  <!-- Right top: Selected layer detail -->
+  <div class="panel detail">
+    <div class="panel-title">
+      <span>Layer Detail</span>
+    </div>
+    <div class="detail-header">
+      <span id="detailName" style="font-size:14px;font-weight:700;">—</span>
+      <span id="detailFreq" style="font-size:11px;color:var(--text-dim);">—</span>
+    </div>
+    <div class="detail-stats" id="detailStats"></div>
+    <div class="belief-grid" id="beliefGrid"></div>
+    <div class="sparkline-wrap">
+      <canvas id="vfeSparkline"></canvas>
+    </div>
+  </div>
+
+  <!-- Right bottom: Weight matrix -->
+  <div class="panel weights">
+    <div class="panel-title">Generative Model W[64x64]</div>
+    <div class="weight-canvas-wrap">
+      <canvas id="weightCanvas" width="160" height="160"></canvas>
+      <div>
+        <div class="weight-stats" id="weightStats"></div>
+        <div style="margin-top:12px">
+          <div class="panel-title" style="margin-bottom:6px;">Residual Energy</div>
+          <div class="residual-bars" id="residualBars"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scrolling volatility charts -->
+  <div class="panel volatility-panel">
+    <div class="panel-title">Volatility</div>
+    <div class="vol-grid">
+      <div class="vol-chart">
+        <h4 style="color:var(--cyan)">VFE per Layer</h4>
+        <canvas id="volVfe"></canvas>
+        <div class="vol-legend" id="volVfeLegend"></div>
+      </div>
+      <div class="vol-chart">
+        <h4 style="color:var(--red)">Challenge Rate</h4>
+        <canvas id="volChallenge"></canvas>
+        <div class="vol-legend" id="volChallengeLegend"></div>
+      </div>
+      <div class="vol-chart">
+        <h4 style="color:var(--orange)">Residual Energy / Gemini Tokens</h4>
+        <canvas id="volResidual"></canvas>
+        <div class="vol-legend">
+          <span class="vol-legend-item"><span class="vol-legend-swatch" style="background:var(--green)"></span>Residual L2</span>
+          <span class="vol-legend-item"><span class="vol-legend-swatch" style="background:var(--orange)"></span>Tokens/call</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Thought stream -->
+  <div class="panel thought-panel">
+    <div class="panel-title">Thought Stream</div>
+    <div class="thought-stream" id="thoughtStream">
+      <div class="thought kind-observe" style="border-left-color: var(--text-dim)">
+        <div class="thought-layer">SYS</div>
+        <div class="thought-text" style="color:var(--text-dim)">Waiting for first thoughts...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Lore Codex -->
+  <div class="panel lore-panel">
+    <div class="panel-title">Lore Codex <span class="lore-count" id="loreCount">0 entries</span></div>
+    <div class="lore-stream" id="loreStream">
+      <div class="lore-entry" style="border-left-color: var(--text-dim)">
+        <div class="lore-answer" style="color:var(--text-dim)">No lore yet. Layers will ask questions when they can't resolve their prediction errors...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom: World model -->
+  <div class="panel world-panel">
+    <div class="panel-title">World Model</div>
+    <div class="world-grid">
+      <div class="world-section">
+        <div class="directive-text" id="worldDirective">—</div>
+        <h3>Scene</h3>
+        <div class="scene-text" id="worldScene">—</div>
+        <h3>Activity</h3>
+        <div class="activity-text" id="worldActivity">—</div>
+      </div>
+      <div class="world-section">
+        <h3>Detected Objects</h3>
+        <table class="obj-table">
+          <thead><tr><th>Name</th><th>Conf</th><th>X</th><th>Y</th></tr></thead>
+          <tbody id="objTableBody"></tbody>
+        </table>
+        <div class="world-stats" id="worldStats"></div>
+      </div>
+      <div class="world-section">
+        <h3>Scene Embedding [64-dim]</h3>
+        <canvas id="embeddingCanvas" width="128" height="128"></canvas>
+        <div class="world-stats" id="embeddingStats"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="disconnected hidden" id="disconnected">
+  <h2>DISCONNECTED</h2>
+  <p>Waiting for qualia-agent WebSocket...</p>
+  <p style="font-size:11px;color:var(--text-dim)">Run: cargo run --bin qualia-agent</p>
+</div>
+
+<script>
+const NUM_LAYERS = 7;
+const STATE_DIM = 64;
+const VFE_HISTORY = 200;
+
+let selectedLayer = 0;
+let vfeHistory = Array.from({length: NUM_LAYERS}, () => []);
+let frameCount = 0;
+let lastFpsTime = performance.now();
+let lastFpsCount = 0;
+
+// ── WebSocket ──
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+  ws.onopen = () => {
+    document.getElementById('disconnected').classList.add('hidden');
+    document.getElementById('connStatus').textContent = 'LIVE';
+    document.getElementById('connStatus').className = 'live';
+  };
+
+  ws.onmessage = (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      if (data.error) {
+        document.getElementById('connStatus').textContent = data.error;
+        return;
+      }
+      frameCount++;
+      update(data);
+    } catch(err) {
+      console.error('Parse error:', err);
+    }
+  };
+
+  ws.onclose = () => {
+    document.getElementById('disconnected').classList.remove('hidden');
+    document.getElementById('connStatus').textContent = 'OFFLINE';
+    document.getElementById('connStatus').className = '';
+    setTimeout(connect, 2000);
+  };
+
+  ws.onerror = () => ws.close();
+}
+
+// ── FPS counter ──
+setInterval(() => {
+  const now = performance.now();
+  const elapsed = (now - lastFpsTime) / 1000;
+  const fps = Math.round((frameCount - lastFpsCount) / elapsed);
+  document.getElementById('fps').textContent = `${fps} fps`;
+  lastFpsTime = now;
+  lastFpsCount = frameCount;
+}, 1000);
+
+// ── Build initial DOM ──
+function init() {
+  const stack = document.getElementById('layerStack');
+  // Render layers top-down: L5 (deep) at top, L0 at bottom, L6 (sensor) at very bottom
+  const order = [5, 4, 3, 2, 1, 0, 6];
+  order.forEach((i, idx) => {
+    if (idx > 0) {
+      const conn = document.createElement('div');
+      conn.className = 'layer-connector';
+      conn.id = `conn-${i}`;
+      stack.appendChild(conn);
+    }
+    const card = document.createElement('div');
+    card.className = 'layer-card' + (i === selectedLayer ? ' active' : '');
+    card.id = `layer-${i}`;
+    card.onclick = () => selectLayer(i);
+    card.innerHTML = `
+      <div class="layer-id">L${i}</div>
+      <div class="layer-info">
+        <div class="layer-name" id="ln-${i}">—</div>
+        <div class="layer-freq" id="lf-${i}">—</div>
+      </div>
+      <div class="layer-vfe" id="lv-${i}">—</div>
+      <div class="layer-meta" id="lm-${i}">—</div>
+    `;
+    stack.appendChild(card);
+  });
+
+  // Residual bars
+  const rb = document.getElementById('residualBars');
+  for (let i = 0; i < STATE_DIM; i++) {
+    const bar = document.createElement('div');
+    bar.className = 'residual-bar';
+    bar.id = `rb-${i}`;
+    rb.appendChild(bar);
+  }
+
+  connect();
+}
+
+function selectLayer(i) {
+  document.querySelectorAll('.layer-card').forEach(c => c.classList.remove('active'));
+  document.getElementById(`layer-${i}`).classList.add('active');
+  selectedLayer = i;
+}
+
+// ── Main update ──
+function update(data) {
+  document.getElementById('ledgerSeq').textContent = `Ledger: ${data.ledger_seq}`;
+
+  // Update layer cards
+  data.layers.forEach(layer => {
+    const i = layer.id;
+    document.getElementById(`ln-${i}`).textContent = layer.name;
+    document.getElementById(`lf-${i}`).textContent = `${layer.freq} Hz`;
+
+    const vfeEl = document.getElementById(`lv-${i}`);
+    if (layer.timestamp_ns === 0) {
+      vfeEl.textContent = '—';
+      vfeEl.className = 'layer-vfe';
+    } else {
+      vfeEl.textContent = layer.vfe.toFixed(4);
+      vfeEl.className = 'layer-vfe ' + vfeClass(layer.vfe);
+    }
+
+    const compPct = (layer.compression / 255 * 100).toFixed(0);
+    document.getElementById(`lm-${i}`).innerHTML = `
+      <div>streak: ${layer.confirm_streak}</div>
+      <div><span class="comp-bar"><span class="comp-bar-fill" style="width:${compPct}%"></span></span> ${layer.compression}</div>
+    `;
+
+    const card = document.getElementById(`layer-${i}`);
+    card.classList.toggle('challenging', layer.challenge);
+    card.classList.toggle('escalating', layer.escalate);
+
+    // VFE history
+    if (!vfeHistory[i]) vfeHistory[i] = [];
+    vfeHistory[i].push(layer.vfe);
+    if (vfeHistory[i].length > VFE_HISTORY) vfeHistory[i].shift();
+  });
+
+  // Connection flow indicators
+  const order = [5, 4, 3, 2, 1, 0, 6];
+  order.forEach((i, idx) => {
+    if (idx > 0) {
+      const conn = document.getElementById(`conn-${i}`);
+      if (conn) {
+        const layer = data.layers[i];
+        conn.className = 'layer-connector' + (layer && layer.challenge ? ' active-flow' : '');
+      }
+    }
+  });
+
+  // Detail panel for selected layer
+  const sel = data.layers[selectedLayer];
+  if (sel) {
+    updateDetail(sel);
+    updateWeights(sel);
+    updateResiduals(sel);
+    updateSparkline();
+  }
+
+  // Thoughts
+  if (data.thoughts && data.thoughts.length > 0) {
+    updateThoughts(data.thoughts);
+  }
+
+  // Scrolling volatility charts
+  updateVolatility(data);
+
+  // Lore
+  if (data.lore && data.lore.length > 0) {
+    updateLore(data.lore, data.lore_total);
+  } else if (data.lore_total) {
+    document.getElementById('loreCount').textContent = `${data.lore_total} entries`;
+  }
+
+  // World model
+  updateWorld(data.world);
+}
+
+function updateDetail(layer) {
+  document.getElementById('detailName').textContent = `L${layer.id} — ${layer.name}`;
+  document.getElementById('detailFreq').textContent = `${layer.freq} Hz | ${layer.cycle_us} us/cycle`;
+
+  document.getElementById('detailStats').innerHTML = `
+    <div class="stat-box">
+      <div class="stat-label">VFE</div>
+      <div class="stat-value ${vfeClass(layer.vfe)}">${layer.vfe.toFixed(6)}</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-label">Compression</div>
+      <div class="stat-value" style="color:var(--blue)">${layer.compression}/255</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-label">Confirm Streak</div>
+      <div class="stat-value" style="color:var(--green)">${layer.confirm_streak}</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-label">Confirms</div>
+      <div class="stat-value" style="color:var(--green)">${layer.confirms}</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-label">Challenges</div>
+      <div class="stat-value" style="color:var(--red)">${layer.challenges}</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-label">Status</div>
+      <div class="stat-value" style="color:${layer.challenge ? 'var(--red)' : layer.escalate ? 'var(--magenta)' : 'var(--green)'}">
+        ${layer.challenge ? 'CHALLENGE' : layer.escalate ? 'ESCALATE' : 'CONFIRM'}
+      </div>
+    </div>
+  `;
+
+  // Belief heatmaps
+  const grid = document.getElementById('beliefGrid');
+  grid.innerHTML = '';
+  const vectors = [
+    { label: 'Mean', data: layer.mean, color: 'green' },
+    { label: 'Precision', data: layer.precision, color: 'cyan' },
+    { label: 'Prediction', data: layer.prediction, color: 'blue' },
+    { label: 'Residual', data: layer.residual, color: 'residual' },
+  ];
+
+  vectors.forEach(({label, data, color}) => {
+    const row = document.createElement('div');
+    row.className = 'belief-row';
+    row.innerHTML = `<div class="belief-row-label">${label}</div><div class="belief-heatmap" id="bh-${label.toLowerCase()}"></div>`;
+    grid.appendChild(row);
+
+    const heatmap = row.querySelector('.belief-heatmap');
+    const max = Math.max(0.001, ...data.map(Math.abs));
+
+    data.forEach(v => {
+      const cell = document.createElement('div');
+      cell.className = 'belief-cell';
+      const intensity = Math.min(Math.abs(v) / max, 1);
+      if (color === 'residual') {
+        const r = v >= 0 ? 0 : Math.round(255 * intensity);
+        const g = v >= 0 ? Math.round(255 * intensity) : 0;
+        cell.style.background = `rgba(${r},${g},0,${0.15 + intensity * 0.85})`;
+      } else {
+        const colors = {
+          green: [0, 255, 136],
+          cyan: [0, 212, 255],
+          blue: [68, 136, 255],
+        };
+        const [cr, cg, cb] = colors[color];
+        cell.style.background = `rgba(${cr},${cg},${cb},${0.05 + intensity * 0.95})`;
+      }
+      cell.title = `[${data.indexOf(v)}] ${v.toFixed(6)}`;
+      heatmap.appendChild(cell);
+    });
+  });
+}
+
+function updateWeights(layer) {
+  const canvas = document.getElementById('weightCanvas');
+  const ctx = canvas.getContext('2d');
+  const grid = layer.weight_grid;
+  const cellSize = 10;
+
+  // Find max for scaling
+  let maxW = 0.01;
+  for (let r = 0; r < 16; r++)
+    for (let c = 0; c < 16; c++)
+      maxW = Math.max(maxW, Math.abs(grid[r][c]));
+
+  for (let r = 0; r < 16; r++) {
+    for (let c = 0; c < 16; c++) {
+      const v = grid[r][c];
+      const intensity = Math.min(Math.abs(v) / maxW, 1);
+      const bright = Math.round(intensity * 255);
+      if (v >= 0) {
+        ctx.fillStyle = `rgb(0,${bright},${Math.round(bright * 0.5)})`;
+      } else {
+        ctx.fillStyle = `rgb(${bright},${Math.round(bright * 0.3)},0)`;
+      }
+      ctx.fillRect(c * cellSize, r * cellSize, cellSize, cellSize);
+    }
+  }
+
+  document.getElementById('weightStats').innerHTML = `
+    Diag mean: <span>${layer.diag_mean.toFixed(4)}</span><br>
+    Off-diag norm: <span>${layer.off_diag_norm.toFixed(4)}</span><br>
+    Bias norm: <span>${layer.bias_norm.toFixed(4)}</span><br>
+    <br>
+    <span style="color:var(--green)">Green = positive</span><br>
+    <span style="color:var(--red)">Red = negative</span><br>
+    Brightness = magnitude
+  `;
+}
+
+function updateResiduals(layer) {
+  const max = Math.max(0.001, ...layer.residual.map(Math.abs));
+  for (let i = 0; i < STATE_DIM; i++) {
+    const bar = document.getElementById(`rb-${i}`);
+    if (!bar) continue;
+    const v = layer.residual[i];
+    const h = Math.min(Math.abs(v) / max * 30, 30);
+    bar.style.height = `${Math.max(1, h)}px`;
+    bar.style.background = v >= 0 ? 'var(--green)' : 'var(--red)';
+    bar.style.opacity = 0.3 + (Math.abs(v) / max) * 0.7;
+  }
+}
+
+function updateSparkline() {
+  const canvas = document.getElementById('vfeSparkline');
+  const ctx = canvas.getContext('2d');
+  const rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width = rect.width * window.devicePixelRatio;
+  canvas.height = rect.height * window.devicePixelRatio;
+  ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+  const w = rect.width;
+  const h = rect.height;
+
+  ctx.clearRect(0, 0, w, h);
+
+  const history = vfeHistory[selectedLayer];
+  if (!history || history.length < 2) return;
+
+  const max = Math.max(0.001, ...history);
+  ctx.strokeStyle = 'rgba(0,212,255,0.8)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+
+  history.forEach((v, i) => {
+    const x = (i / (VFE_HISTORY - 1)) * w;
+    const y = h - (v / max) * (h - 4) - 2;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+
+  ctx.stroke();
+
+  // Fill under
+  ctx.lineTo(w, h);
+  ctx.lineTo(0, h);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(0,212,255,0.08)';
+  ctx.fill();
+}
+
+function updateWorld(world) {
+  document.getElementById('worldDirective').textContent = world.directive || '(none)';
+  document.getElementById('worldScene').textContent = world.scene || '(no scene data)';
+  document.getElementById('worldActivity').textContent = world.activity || '(no activity)';
+
+  // Objects table
+  const tbody = document.getElementById('objTableBody');
+  if (world.objects.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="4" style="color:var(--text-dim)">(no objects)</td></tr>';
+  } else {
+    tbody.innerHTML = world.objects.map(obj => {
+      const confClass = obj.confidence > 0.8 ? 'obj-conf-high' :
+                        obj.confidence > 0.5 ? 'obj-conf-mid' : 'obj-conf-low';
+      return `<tr>
+        <td>${obj.name}</td>
+        <td class="${confClass}">${obj.confidence.toFixed(2)}</td>
+        <td>${obj.x.toFixed(2)}</td>
+        <td>${obj.y.toFixed(2)}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // Stats & Gemini cost tracking
+  // Gemini 2.0 Flash: $0.10/1M input, $0.40/1M output
+  // text-embedding-004: $0.006/1k tokens (effectively free)
+  const inputCost = (world.gemini_input_tokens / 1_000_000) * 0.10;
+  const outputCost = (world.gemini_output_tokens / 1_000_000) * 0.40;
+  const embedCost = (world.gemini_embedding_tokens / 1_000) * 0.006;
+  const totalCost = inputCost + outputCost + embedCost;
+  const totalTokens = world.gemini_input_tokens + world.gemini_output_tokens + world.gemini_embedding_tokens;
+
+  // Track cost history for sparkline
+  if (!window.costHistory) window.costHistory = [];
+  window.costHistory.push(totalCost);
+  if (window.costHistory.length > VFE_HISTORY) window.costHistory.shift();
+
+  document.getElementById('worldStats').innerHTML = `
+    <div style="margin-bottom:8px;padding:8px;background:var(--bg2);border-radius:3px;border-left:3px solid var(--orange)">
+      <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--orange);margin-bottom:4px">Gemini API Cost</div>
+      <div style="font-size:20px;font-weight:700;color:var(--orange)">$${totalCost.toFixed(4)}</div>
+      <div style="margin-top:4px;font-size:10px">
+        Vision in: <span style="color:var(--text)">${world.gemini_input_tokens.toLocaleString()} tok</span> ($${inputCost.toFixed(4)})<br>
+        Vision out: <span style="color:var(--text)">${world.gemini_output_tokens.toLocaleString()} tok</span> ($${outputCost.toFixed(4)})<br>
+        Embedding: <span style="color:var(--text)">${world.gemini_embedding_tokens.toLocaleString()} tok</span> ($${embedCost.toFixed(4)})<br>
+        Total tokens: <span style="color:var(--text)">${totalTokens.toLocaleString()}</span>
+      </div>
+      <canvas id="costSparkline" width="240" height="30" style="margin-top:6px;width:100%;height:30px"></canvas>
+    </div>
+    Vision frames: <span>${world.vision_frame_count}</span><br>
+    Gemini calls: <span>${world.llm_call_count}</span><br>
+    Update seq: <span>${world.update_seq}</span><br>
+    Objects: <span>${world.num_objects}</span>
+  `;
+
+  // Draw cost sparkline
+  const costCanvas = document.getElementById('costSparkline');
+  if (costCanvas && window.costHistory.length > 1) {
+    const cctx = costCanvas.getContext('2d');
+    const cw = costCanvas.width;
+    const ch = costCanvas.height;
+    cctx.clearRect(0, 0, cw, ch);
+    const maxCost = Math.max(0.0001, ...window.costHistory);
+    cctx.strokeStyle = 'rgba(255,136,68,0.8)';
+    cctx.lineWidth = 1.5;
+    cctx.beginPath();
+    window.costHistory.forEach((v, i) => {
+      const x = (i / (VFE_HISTORY - 1)) * cw;
+      const y = ch - (v / maxCost) * (ch - 4) - 2;
+      if (i === 0) cctx.moveTo(x, y);
+      else cctx.lineTo(x, y);
+    });
+    cctx.stroke();
+    cctx.lineTo(cw, ch);
+    cctx.lineTo(0, ch);
+    cctx.closePath();
+    cctx.fillStyle = 'rgba(255,136,68,0.08)';
+    cctx.fill();
+  }
+
+  // Embedding heatmap (8x8 grid)
+  const canvas = document.getElementById('embeddingCanvas');
+  const ctx = canvas.getContext('2d');
+  const emb = world.scene_embedding;
+  if (!emb || emb.length === 0) return;
+
+  const cellW = canvas.width / 8;
+  const cellH = canvas.height / 8;
+  const maxE = Math.max(0.01, ...emb.map(Math.abs));
+
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 8; c++) {
+      const v = emb[r * 8 + c];
+      const intensity = Math.min(Math.abs(v) / maxE, 1);
+      const bright = Math.round(intensity * 255);
+      if (v >= 0) {
+        ctx.fillStyle = `rgb(0,${bright},${Math.round(bright * 0.5)})`;
+      } else {
+        ctx.fillStyle = `rgb(${bright},${Math.round(bright * 0.3)},0)`;
+      }
+      ctx.fillRect(c * cellW, r * cellH, cellW, cellH);
+    }
+  }
+
+  const embNorm = Math.sqrt(emb.reduce((s, v) => s + v * v, 0));
+  const embMean = emb.reduce((s, v) => s + v, 0) / emb.length;
+  document.getElementById('embeddingStats').innerHTML = `
+    Norm: <span>${embNorm.toFixed(3)}</span><br>
+    Mean: <span>${embMean.toFixed(4)}</span>
+  `;
+}
+
+const THOUGHT_KINDS = ['observe', 'predict', 'surprise', 'learn', 'resolve', 'escalate'];
+const THOUGHT_KIND_LABELS = ['OBSERVE', 'PREDICT', 'SURPRISE', 'LEARN', 'RESOLVE', 'ESCALATE'];
+const MAX_VISIBLE_THOUGHTS = 80;
+let firstThoughts = true;
+
+function updateThoughts(thoughts) {
+  const stream = document.getElementById('thoughtStream');
+
+  // Clear the "waiting" placeholder on first real thought
+  if (firstThoughts && thoughts.length > 0) {
+    stream.innerHTML = '';
+    firstThoughts = false;
+  }
+
+  thoughts.forEach(t => {
+    const kindName = THOUGHT_KINDS[t.kind] || 'observe';
+    const kindLabel = THOUGHT_KIND_LABELS[t.kind] || 'OBSERVE';
+    const layerLabel = t.layer === 255 ? 'VIS' : `L${t.layer}`;
+
+    const el = document.createElement('div');
+    el.className = `thought kind-${kindName}`;
+    el.innerHTML = `
+      <div class="thought-layer">${layerLabel}</div>
+      <span class="thought-kind kind-${kindName}">${kindLabel}</span>
+      <div class="thought-text">${escapeHtml(t.text)}</div>
+      <div class="thought-time">${formatThoughtTime(t.timestamp_ns)}</div>
+    `;
+    stream.appendChild(el);
+  });
+
+  // Trim old thoughts
+  while (stream.children.length > MAX_VISIBLE_THOUGHTS) {
+    stream.removeChild(stream.firstChild);
+  }
+
+  // Auto-scroll to bottom
+  stream.scrollTop = stream.scrollHeight;
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function formatThoughtTime(ns) {
+  if (!ns) return '';
+  const totalMs = Math.floor(ns / 1000000);
+  const ms = totalMs % 1000;
+  const totalSecs = Math.floor(totalMs / 1000);
+  const secs = totalSecs % 60;
+  const mins = Math.floor(totalSecs / 60) % 60;
+  const hours = Math.floor(totalSecs / 3600) % 24;
+  return `${String(hours).padStart(2,'0')}:${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')}.${String(ms).padStart(3,'0')}`;
+}
+
+function vfeClass(vfe) {
+  if (vfe < 0.01) return 'vfe-good';
+  if (vfe < 0.05) return 'vfe-warn';
+  return 'vfe-bad';
+}
+
+// ── Lore Codex ──
+const REASON_LABELS = ['STUCK', 'PLATEAU', 'NOVEL'];
+const REASON_CLASSES = ['r-0', 'r-1', 'r-2'];
+const MAX_VISIBLE_LORE = 50;
+let firstLore = true;
+
+function updateLore(entries, total) {
+  const stream = document.getElementById('loreStream');
+  document.getElementById('loreCount').textContent = `${total} entries`;
+
+  if (firstLore && entries.length > 0) {
+    stream.innerHTML = '';
+    firstLore = false;
+  }
+
+  entries.forEach(l => {
+    const reasonLabel = REASON_LABELS[l.reason] || 'UNKNOWN';
+    const reasonClass = REASON_CLASSES[l.reason] || 'r-0';
+    const layerLabel = l.layer === 255 ? 'VIS' : `L${l.layer}`;
+
+    const el = document.createElement('div');
+    el.className = `lore-entry reason-${l.reason}`;
+    el.innerHTML = `
+      <div class="lore-header">
+        <span class="lore-layer">${layerLabel}</span>
+        <span class="lore-reason ${reasonClass}">${reasonLabel}</span>
+      </div>
+      <div class="lore-question">${escapeHtml(l.question)}</div>
+      <div class="lore-answer">${escapeHtml(l.answer)}</div>
+      <div class="lore-meta">
+        <span>emb shift: ${l.embedding_delta.toFixed(4)}</span>
+        <span>${formatThoughtTime(l.timestamp_ns)}</span>
+      </div>
+    `;
+    stream.appendChild(el);
+  });
+
+  while (stream.children.length > MAX_VISIBLE_LORE) {
+    stream.removeChild(stream.firstChild);
+  }
+
+  stream.scrollTop = stream.scrollHeight;
+}
+
+// ── Scrolling volatility charts ──
+// Ring buffers — shift left, push right. Canvas redraws only dirty region.
+const VOL_W = 300; // samples visible
+const LAYER_COLORS = ['#00d4ff','#4488ff','#00ff88','#ffcc00','#ff8844','#cc66ff','#ff4466'];
+
+const volState = {
+  vfe: Array.from({length: NUM_LAYERS}, () => new Float32Array(VOL_W)),
+  challenge: Array.from({length: NUM_LAYERS}, () => new Float32Array(VOL_W)),
+  residualL2: new Float32Array(VOL_W),
+  tokPerCall: new Float32Array(VOL_W),
+  prevChallenges: new Array(NUM_LAYERS).fill(0),
+  prevTokens: 0,
+  prevCalls: 0,
+  idx: 0,
+  legendBuilt: false,
+};
+
+function updateVolatility(data) {
+  const i = volState.idx;
+
+  // Push new samples
+  data.layers.forEach(l => {
+    volState.vfe[l.id].copyWithin(0, 1);
+    volState.vfe[l.id][VOL_W - 1] = l.vfe;
+
+    const delta = l.challenges - volState.prevChallenges[l.id];
+    volState.challenge[l.id].copyWithin(0, 1);
+    volState.challenge[l.id][VOL_W - 1] = delta;
+    volState.prevChallenges[l.id] = l.challenges;
+  });
+
+  // Residual L2 norm of selected layer
+  const sel = data.layers[selectedLayer];
+  if (sel) {
+    const l2 = Math.sqrt(sel.residual.reduce((s, v) => s + v * v, 0));
+    volState.residualL2.copyWithin(0, 1);
+    volState.residualL2[VOL_W - 1] = l2;
+  }
+
+  // Tokens per call
+  const w = data.world;
+  const totalTok = w.gemini_input_tokens + w.gemini_output_tokens + w.gemini_embedding_tokens;
+  const callDelta = w.llm_call_count - volState.prevCalls;
+  const tokDelta = totalTok - volState.prevTokens;
+  volState.tokPerCall.copyWithin(0, 1);
+  volState.tokPerCall[VOL_W - 1] = callDelta > 0 ? tokDelta / callDelta : 0;
+  volState.prevTokens = totalTok;
+  volState.prevCalls = w.llm_call_count;
+
+  volState.idx++;
+
+  // Draw every 2nd frame to stay fast
+  if (volState.idx % 2 === 0) {
+    drawVolCanvas('volVfe', volState.vfe, LAYER_COLORS);
+    drawVolCanvas('volChallenge', volState.challenge, LAYER_COLORS);
+    drawVolDual('volResidual', volState.residualL2, volState.tokPerCall);
+  }
+
+  // Build legends once
+  if (!volState.legendBuilt) {
+    const names = ['L0','L1','L2','L3','L4','L5','L6'];
+    const vfeLeg = document.getElementById('volVfeLegend');
+    const chLeg = document.getElementById('volChallengeLegend');
+    if (vfeLeg) {
+      vfeLeg.innerHTML = names.map((n, i) =>
+        `<span class="vol-legend-item"><span class="vol-legend-swatch" style="background:${LAYER_COLORS[i]}"></span>${n}</span>`
+      ).join('');
+    }
+    if (chLeg) {
+      chLeg.innerHTML = names.map((n, i) =>
+        `<span class="vol-legend-item"><span class="vol-legend-swatch" style="background:${LAYER_COLORS[i]}"></span>${n}</span>`
+      ).join('');
+    }
+    volState.legendBuilt = true;
+  }
+}
+
+function drawVolCanvas(id, seriesArr, colors) {
+  const canvas = document.getElementById(id);
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  const w = rect.width;
+  const h = rect.height;
+  if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    ctx.scale(dpr, dpr);
+  }
+  ctx.clearRect(0, 0, w, h);
+
+  // Find global max across all series
+  let maxV = 0.0001;
+  for (let s = 0; s < seriesArr.length; s++) {
+    for (let i = 0; i < VOL_W; i++) {
+      if (seriesArr[s][i] > maxV) maxV = seriesArr[s][i];
+    }
+  }
+
+  // Bar width
+  const barW = w / VOL_W;
+
+  // Draw as stacked thin bars scrolling left
+  for (let s = seriesArr.length - 1; s >= 0; s--) {
+    ctx.fillStyle = colors[s % colors.length];
+    ctx.globalAlpha = 0.7;
+    const arr = seriesArr[s];
+    for (let i = 0; i < VOL_W; i++) {
+      const v = arr[i];
+      if (v <= 0) continue;
+      const barH = (v / maxV) * h;
+      ctx.fillRect(i * barW, h - barH, Math.max(barW - 0.5, 0.5), barH);
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawVolDual(id, series1, series2) {
+  const canvas = document.getElementById(id);
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  const w = rect.width;
+  const h = rect.height;
+  if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    ctx.scale(dpr, dpr);
+  }
+  ctx.clearRect(0, 0, w, h);
+
+  const barW = w / VOL_W;
+
+  // Series 1: residual L2 (green bars from bottom)
+  let max1 = 0.0001;
+  for (let i = 0; i < VOL_W; i++) if (series1[i] > max1) max1 = series1[i];
+  ctx.fillStyle = '#00ff88';
+  ctx.globalAlpha = 0.6;
+  for (let i = 0; i < VOL_W; i++) {
+    const v = series1[i];
+    if (v <= 0) continue;
+    const barH = (v / max1) * (h * 0.6);
+    ctx.fillRect(i * barW, h - barH, Math.max(barW - 0.5, 0.5), barH);
+  }
+
+  // Series 2: tokens per call (orange line from top)
+  let max2 = 1;
+  for (let i = 0; i < VOL_W; i++) if (series2[i] > max2) max2 = series2[i];
+  ctx.strokeStyle = '#ff8844';
+  ctx.globalAlpha = 0.9;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let i = 0; i < VOL_W; i++) {
+    const v = series2[i];
+    const x = i * barW + barW / 2;
+    const y = h - (v / max2) * (h - 4) - 2;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
+init();
+</script>
+</body>
+</html>

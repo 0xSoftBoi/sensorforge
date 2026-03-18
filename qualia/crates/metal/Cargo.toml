@@ -1,0 +1,12 @@
+[package]
+name = "qualia-metal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Metal compute pipeline for belief updates"
+
+[dependencies]
+qualia-types.workspace = true
+qualia-shm.workspace = true
+metal = "0.31"
+objc = "0.2"

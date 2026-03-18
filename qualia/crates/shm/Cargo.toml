@@ -1,0 +1,10 @@
+[package]
+name = "qualia-shm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared memory primitives, init, mapping"
+
+[dependencies]
+qualia-types.workspace = true
+libc = "0.2"
