@@ -1,7 +1,6 @@
 pub use qualia_types::*;
 
 use cudarc::driver::{CudaDevice, CudaSlice, LaunchAsync, LaunchConfig};
-use cudarc::nvrtc::Ptx;
 use std::sync::Arc;
 
 const BELIEF_KERNEL_SRC: &str = include_str!("../../../kernels/belief_update.cu");
@@ -23,10 +22,11 @@ impl CudaContext {
     pub fn new(params: &LayerParams) -> Result<Self, String> {
         let device = CudaDevice::new(0).map_err(|e| format!("CUDA device init failed: {e}"))?;
 
-        let ptx = Ptx::from_src(BELIEF_KERNEL_SRC);
+        let ptx = cudarc::nvrtc::compile_ptx(BELIEF_KERNEL_SRC)
+            .map_err(|e| format!("NVRTC compile failed: {e}"))?;
         device
             .load_ptx(ptx, "belief", &["belief_update"])
-            .map_err(|e| format!("PTX compile/load failed: {e}"))?;
+            .map_err(|e| format!("PTX load failed: {e}"))?;
 
         let params_data: [f32; 4] = [
             params.threshold,
