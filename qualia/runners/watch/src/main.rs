@@ -25,6 +25,7 @@ static RUNNER_NAMES: &[&str] = &[
     "qualia-l3-belief",
     "qualia-l4-behavior",
     "qualia-l5-behavior",
+    "qualia-l6-semantic",
     "qualia-health",
     "qualia-vision",
     "qualia-agent",
