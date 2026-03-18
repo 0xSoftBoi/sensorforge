@@ -93,7 +93,10 @@ SYSTEM_PROMPT = (
     "asks about the system. You can see through a camera and describe what "
     "you see. You can control the robot — move forward, backward, turn, and stop. "
     "You can explore autonomously using your camera and navigation intelligence. "
-    "You can also remember previous conversations."
+    "You can also remember previous conversations. "
+    "You have a Qualia brain — an active inference engine with 7 layers that "
+    "learns to predict and understand the environment. You can check what your "
+    "brain is thinking, which layers are surprised, and set high-level directives."
 )
 
 # UGV serial port
@@ -467,6 +470,66 @@ def tool_ugv_status():
     return ugv.get_status()
 
 
+# ─── Qualia Brain Tools ─────────────────────────────────────────
+# These read the Qualia active inference engine's shared memory.
+
+def tool_qualia_beliefs():
+    """Get summary of all Qualia layer beliefs."""
+    try:
+        from qualia_bridge import get_bridge
+        bridge = get_bridge()
+        if bridge is None:
+            return "Qualia engine is not running (SHM not available)."
+        return bridge.get_beliefs_summary()
+    except ImportError:
+        return "Qualia bridge module not found."
+    except Exception as e:
+        return f"Qualia error: {e}"
+
+
+def tool_qualia_surprise():
+    """Which Qualia layers have high prediction errors."""
+    try:
+        from qualia_bridge import get_bridge
+        bridge = get_bridge()
+        if bridge is None:
+            return "Qualia engine is not running."
+        return bridge.get_surprise_summary()
+    except ImportError:
+        return "Qualia bridge module not found."
+    except Exception as e:
+        return f"Qualia error: {e}"
+
+
+def tool_qualia_lore():
+    """Recent LORE entries — questions the brain asked and answers it received."""
+    try:
+        from qualia_bridge import get_bridge
+        bridge = get_bridge()
+        if bridge is None:
+            return "Qualia engine is not running."
+        return bridge.get_lore_summary()
+    except ImportError:
+        return "Qualia bridge module not found."
+    except Exception as e:
+        return f"Qualia error: {e}"
+
+
+def tool_qualia_directive(text):
+    """Set the brain's top-level goal / directive."""
+    try:
+        from qualia_bridge import get_bridge
+        bridge = get_bridge()
+        if bridge is None:
+            return "Qualia engine is not running."
+        bridge.write_directive(text)
+        return f"Directive set: {text}"
+    except ImportError:
+        return "Qualia bridge module not found."
+    except Exception as e:
+        return f"Qualia error: {e}"
+
+
 # ─── Tool Registry ──────────────────────────────────────────────
 # Maps name → (callable, [param_names])
 
@@ -493,6 +556,11 @@ TOOL_REGISTRY = {
     "turn_right": (tool_ugv_turn_right, ["duration", "speed"]),
     "stop_robot": (tool_ugv_stop, []),
     "robot_status": (tool_ugv_status, []),
+    # Qualia brain tools
+    "qualia_beliefs": (tool_qualia_beliefs, []),
+    "qualia_surprise": (tool_qualia_surprise, []),
+    "qualia_lore": (tool_qualia_lore, []),
+    "qualia_directive": (tool_qualia_directive, ["text"]),
 }
 
 
@@ -825,6 +893,53 @@ OLLAMA_TOOLS = [
             "description": "Get robot battery voltage and IMU sensor data",
             "parameters": {
                 "type": "object", "properties": {}, "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "qualia_beliefs",
+            "description": "Get the Qualia brain's current belief states across all 7 layers (prediction errors, compression, learning rate)",
+            "parameters": {
+                "type": "object", "properties": {}, "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "qualia_surprise",
+            "description": "Check which Qualia brain layers are surprised (high prediction error) — indicates something unexpected in the environment",
+            "parameters": {
+                "type": "object", "properties": {}, "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "qualia_lore",
+            "description": "Get recent LORE entries — questions the brain asked about the world and answers it received",
+            "parameters": {
+                "type": "object", "properties": {}, "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "qualia_directive",
+            "description": "Set the Qualia brain's top-level goal or directive (e.g. 'explore the room', 'watch for intruders')",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "The directive text to set",
+                    },
+                },
+                "required": ["text"],
             },
         },
     },
@@ -1476,6 +1591,16 @@ DISPATCH_PATTERNS = [
      "turn_right", None, "{result}"),
     (re.compile(r"\b(battery|charge|robot status|imu)\b", re.I),
      "robot_status", None, "Robot status: {result}"),
+
+    # Qualia brain
+    (re.compile(r"\b(qualia|brain|belief|layer|thinking|thought)\b.*\b(state|status|thinking|beliefs?)\b", re.I),
+     "qualia_beliefs", None, "{result}"),
+    (re.compile(r"\b(surpris|predict.*error|high vfe|unexpected|confused)\b", re.I),
+     "qualia_surprise", None, "{result}"),
+    (re.compile(r"\b(lore|knowledge|questions?.*asked|world.*knowledge)\b", re.I),
+     "qualia_lore", None, "{result}"),
+    (re.compile(r"\bwhat.*\b(qualia|brain)\b.*\bthink", re.I),
+     "qualia_beliefs", None, "{result}"),
 ]
 
 # Vision patterns (P4) — handled separately since they don't use tool registry

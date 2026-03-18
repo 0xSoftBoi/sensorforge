@@ -21,6 +21,28 @@ members = [
     "runners/vision",
 ]
 
+# Exclude crates/cuda from default builds (requires CUDA toolkit).
+# On Jetson: cargo build -p qualia-l0-superposition --no-default-features --features cuda
+default-members = [
+    "crates/types",
+    "crates/shm",
+    "crates/ipc",
+    "crates/metal",
+    "runners/l0-superposition",
+    "runners/l1-belief",
+    "runners/l2-belief",
+    "runners/l3-belief",
+    "runners/l4-behavior",
+    "runners/l5-behavior",
+    "runners/l6-semantic",
+    "runners/health",
+    "runners/agent",
+    "runners/init",
+    "runners/watch",
+    "runners/camera",
+    "runners/vision",
+]
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
@@ -32,3 +54,4 @@ qualia-types = { path = "crates/types" }
 qualia-shm = { path = "crates/shm" }
 qualia-ipc = { path = "crates/ipc" }
 qualia-metal = { path = "crates/metal" }
+qualia-cuda = { path = "crates/cuda" }
