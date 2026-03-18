@@ -5,6 +5,28 @@ use std::sync::Arc;
 
 const BELIEF_KERNEL_SRC: &str = include_str!("../../../kernels/belief_update.cu");
 
+/// Detect GPU compute capability for PTX compilation targeting.
+/// Fixes CUDA_ERROR_UNSUPPORTED_PTX_VERSION when toolkit > driver version.
+fn detect_gpu_arch(device: &Arc<CudaDevice>) -> Option<&'static str> {
+    if let Ok(arch) = std::env::var("QUALIA_CUDA_ARCH") {
+        return Some(Box::leak(arch.into_boxed_str()));
+    }
+
+    use cudarc::driver::sys::CUdevice_attribute::*;
+    let major = device
+        .attribute(CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
+        .ok()?;
+    let minor = device
+        .attribute(CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)
+        .ok()?;
+    let arch_str = format!("compute_{}{}", major, minor);
+    eprintln!(
+        "qualia-cuda: detected GPU compute_{}{}, targeting PTX for it",
+        major, minor
+    );
+    Some(Box::leak(arch_str.into_boxed_str()))
+}
+
 pub struct LayerParams {
     pub threshold: f32,
     pub learning_rate: f32,
@@ -22,7 +44,12 @@ impl CudaContext {
     pub fn new(params: &LayerParams) -> Result<Self, String> {
         let device = CudaDevice::new(0).map_err(|e| format!("CUDA device init failed: {e}"))?;
 
-        let ptx = cudarc::nvrtc::compile_ptx(BELIEF_KERNEL_SRC)
+        let arch = detect_gpu_arch(&device);
+        let opts = cudarc::nvrtc::CompileOptions {
+            arch,
+            ..Default::default()
+        };
+        let ptx = cudarc::nvrtc::compile_ptx_with_opts(BELIEF_KERNEL_SRC, opts)
             .map_err(|e| format!("NVRTC compile failed: {e}"))?;
         device
             .load_ptx(ptx, "belief", &["belief_update"])
