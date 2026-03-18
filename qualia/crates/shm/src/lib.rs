@@ -68,6 +68,9 @@ pub const THOUGHT_BUFFER_OFFSET: usize = WORLD_MODEL_OFFSET + std::mem::size_of:
 /// LoreBuffer lives after ThoughtBuffer.
 pub const LORE_BUFFER_OFFSET: usize = THOUGHT_BUFFER_OFFSET + std::mem::size_of::<ThoughtBuffer>();
 
+/// ActionHistory lives after LoreBuffer (Phase 3.2).
+pub const ACTION_HISTORY_OFFSET: usize = LORE_BUFFER_OFFSET + std::mem::size_of::<LoreBuffer>();
+
 // ---------------------------------------------------------------------------
 // ShmRegion
 // ---------------------------------------------------------------------------
@@ -342,6 +345,30 @@ impl ShmRegion {
         entry.answer[..a_len].copy_from_slice(&a_bytes[..a_len]);
     }
 
+    /// Reference to the ActionHistory (Phase 3.2).
+    pub fn action_history(&self) -> &ActionHistory {
+        unsafe {
+            let ptr = self.ptr.add(ACTION_HISTORY_OFFSET);
+            &*(ptr as *const ActionHistory)
+        }
+    }
+
+    /// Mutable reference to the ActionHistory. Only the explorer should call this.
+    pub fn action_history_mut(&self) -> &mut ActionHistory {
+        unsafe {
+            let ptr = self.ptr.add(ACTION_HISTORY_OFFSET);
+            &mut *(ptr as *mut ActionHistory)
+        }
+    }
+
+    /// Append an action entry to the ring buffer (lock-free).
+    pub fn emit_action(&self, entry: &ActionEntry) {
+        let ah = self.action_history_mut();
+        let seq = ah.write_seq.fetch_add(1, Ordering::AcqRel);
+        let idx = (seq as usize) % MAX_ACTION_ENTRIES;
+        ah.entries[idx] = *entry;
+    }
+
     /// Raw pointer to the mapped region.
     pub fn as_ptr(&self) -> *mut u8 {
         self.ptr
@@ -457,6 +484,7 @@ mod tests {
         assert!(WORLD_MODEL_OFFSET + mem::size_of::<WorldModel>() <= SHM_SIZE);
         assert!(THOUGHT_BUFFER_OFFSET + mem::size_of::<ThoughtBuffer>() <= SHM_SIZE);
         assert!(LORE_BUFFER_OFFSET + mem::size_of::<LoreBuffer>() <= SHM_SIZE);
+        assert!(ACTION_HISTORY_OFFSET + mem::size_of::<ActionHistory>() <= SHM_SIZE);
     }
 
     #[test]

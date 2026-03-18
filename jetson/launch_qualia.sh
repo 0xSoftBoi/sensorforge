@@ -129,10 +129,32 @@ if [ "$RECORD" = true ]; then
     PIDS+=($!)
 fi
 
-# ── 8. Launch autonomous explorer (if --drive) ───────────────────
+# ── 8. Launch local object detection (Phase 2.2) ─────────────────
+if [ -f "$SCRIPT_DIR/qualia_detect.py" ]; then
+    echo "Starting local YOLO detection..."
+    QUALIA_DETECT_HZ="${QUALIA_DETECT_HZ:-2}" python3 "$SCRIPT_DIR/qualia_detect.py" &
+    PIDS+=($!)
+    sleep 1
+fi
+
+# ── 9. Launch local embeddings (Phase 2.3) ───────────────────────
+if [ -f "$SCRIPT_DIR/qualia_embed.py" ]; then
+    echo "Starting local embeddings..."
+    python3 "$SCRIPT_DIR/qualia_embed.py" --interval 2.0 &
+    PIDS+=($!)
+fi
+
+# ── 10. Launch audio features (Phase 4.1) ────────────────────────
+if [ -f "$SCRIPT_DIR/qualia_audio.py" ] && [ -d /proc/asound ]; then
+    echo "Starting audio features..."
+    python3 "$SCRIPT_DIR/qualia_audio.py" --bands 32 &
+    PIDS+=($!)
+fi
+
+# ── 11. Launch autonomous explorer (if --drive) ──────────────────
 if [ "$DRIVE" = true ]; then
     if [ -c /dev/ttyACM0 ]; then
-        echo "Starting autonomous explorer..."
+        echo "Starting EFE autonomous explorer..."
         python3 "$SCRIPT_DIR/autonomous_explorer.py" &
         PIDS+=($!)
     else
@@ -148,6 +170,8 @@ echo "  Recording:    $RECORD"
 echo "  Driving:      $DRIVE"
 echo "  Checkpoints:  $QUALIA_CHECKPOINT_DIR"
 echo "  Gemini:       ${GEMINI_API_KEY:+enabled}${GEMINI_API_KEY:-offline}"
+echo "  Local detect: $(command -v python3 >/dev/null && python3 -c 'import super_gradients' 2>/dev/null && echo 'YOLO' || echo 'unavailable')"
+echo "  Local embed:  $(command -v python3 >/dev/null && python3 -c 'import onnxruntime' 2>/dev/null && echo 'ONNX' || echo 'unavailable')"
 echo ""
 echo "Press Ctrl-C to stop all processes."
 

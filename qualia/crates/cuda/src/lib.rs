@@ -117,6 +117,12 @@ pub struct LayerParams {
     pub layer_id: u8,
     pub freq_hz: f64,
     pub weight_decay: f32,
+    /// Precision learning rate for free-energy gradient (Phase 1.1)
+    pub precision_eta: f32,
+    /// Z-score threshold for surprise-gated sparse updates (Phase 5.2)
+    pub surprise_threshold: f32,
+    /// Weight for top-down prediction errors (Phase 5.1)
+    pub top_down_weight: f32,
 }
 
 pub struct CudaContext {
@@ -125,7 +131,7 @@ pub struct CudaContext {
 }
 
 impl CudaContext {
-    pub fn new(params: &LayerParams) -> Result<Self, String> {
+    pub fn new(params: &LayerParams, has_above: bool) -> Result<Self, String> {
         let device = CudaDevice::new(0).map_err(|e| format!("CUDA device init failed: {e}"))?;
 
         let ptx = compile_kernel(&device)?;
@@ -133,11 +139,15 @@ impl CudaContext {
             .load_ptx(ptx, "belief", &["belief_update"])
             .map_err(|e| format!("PTX load failed: {e}"))?;
 
-        let params_data: [f32; 4] = [
+        let params_data: [f32; 8] = [
             params.threshold,
             params.learning_rate,
             params.layer_id as f32,
             params.weight_decay,
+            if has_above { 1.0 } else { 0.0 },
+            params.precision_eta,
+            params.surprise_threshold,
+            params.top_down_weight,
         ];
         let params_dev = device
             .htod_copy(params_data.to_vec())
@@ -151,10 +161,13 @@ impl CudaContext {
     }
 
     /// Run belief update kernel on GPU with full generative model.
+    /// `above` is the belief from the layer above (for top-down prediction errors).
+    /// Pass None for the topmost layer.
     pub fn dispatch_belief_update(
         &self,
         belief: &mut BeliefSlot,
         below: &BeliefSlot,
+        above: Option<&BeliefSlot>,
         weights: &mut [f32; WEIGHT_COUNT],
         bias: &mut [f32; STATE_DIM],
     ) {
@@ -171,6 +184,16 @@ impl CudaContext {
             )
         };
 
+        // For the above layer: use real data or a zeroed placeholder
+        let dummy_above: BeliefSlot = unsafe { std::mem::zeroed() };
+        let above_ref = above.unwrap_or(&dummy_above);
+        let above_bytes = unsafe {
+            std::slice::from_raw_parts(
+                above_ref as *const BeliefSlot as *const u8,
+                std::mem::size_of::<BeliefSlot>(),
+            )
+        };
+
         let belief_dev = self
             .device
             .htod_copy(belief_bytes.to_vec())
@@ -179,6 +202,10 @@ impl CudaContext {
             .device
             .htod_copy(below_bytes.to_vec())
             .expect("below htod");
+        let above_dev = self
+            .device
+            .htod_copy(above_bytes.to_vec())
+            .expect("above htod");
         let weights_dev = self
             .device
             .htod_copy(weights.to_vec())
@@ -201,7 +228,7 @@ impl CudaContext {
             kernel
                 .launch(
                     cfg,
-                    (&belief_dev, &below_dev, &self.params_dev, &weights_dev, &bias_dev),
+                    (&belief_dev, &below_dev, &above_dev, &self.params_dev, &weights_dev, &bias_dev),
                 )
                 .expect("kernel launch failed");
         }
@@ -235,6 +262,9 @@ pub fn default_params(layer_id: u8) -> LayerParams {
             layer_id: 0,
             freq_hz: 1000.0,
             weight_decay: 0.0001,
+            precision_eta: 0.01,
+            surprise_threshold: 2.0,
+            top_down_weight: 0.3,
         },
         1 => LayerParams {
             threshold: 0.08,
@@ -242,6 +272,9 @@ pub fn default_params(layer_id: u8) -> LayerParams {
             layer_id: 1,
             freq_hz: 100.0,
             weight_decay: 0.0001,
+            precision_eta: 0.01,
+            surprise_threshold: 2.0,
+            top_down_weight: 0.3,
         },
         2 => LayerParams {
             threshold: 0.05,
@@ -249,6 +282,9 @@ pub fn default_params(layer_id: u8) -> LayerParams {
             layer_id: 2,
             freq_hz: 100.0,
             weight_decay: 0.00005,
+            precision_eta: 0.008,
+            surprise_threshold: 2.0,
+            top_down_weight: 0.3,
         },
         3 => LayerParams {
             threshold: 0.05,
@@ -256,6 +292,9 @@ pub fn default_params(layer_id: u8) -> LayerParams {
             layer_id: 3,
             freq_hz: 100.0,
             weight_decay: 0.00005,
+            precision_eta: 0.008,
+            surprise_threshold: 2.0,
+            top_down_weight: 0.3,
         },
         4 => LayerParams {
             threshold: 0.03,
@@ -263,6 +302,9 @@ pub fn default_params(layer_id: u8) -> LayerParams {
             layer_id: 4,
             freq_hz: 1.0,
             weight_decay: 0.00001,
+            precision_eta: 0.005,
+            surprise_threshold: 2.5,
+            top_down_weight: 0.4,
         },
         5 => LayerParams {
             threshold: 0.02,
@@ -270,13 +312,20 @@ pub fn default_params(layer_id: u8) -> LayerParams {
             layer_id: 5,
             freq_hz: 0.1,
             weight_decay: 0.00001,
+            precision_eta: 0.003,
+            surprise_threshold: 3.0,
+            top_down_weight: 0.5,
         },
+        // Phase 1.3: Enable L6 learning — was lr=0.0/wd=0.0
         6 => LayerParams {
             threshold: 0.1,
-            learning_rate: 0.0,
+            learning_rate: 0.001,
             layer_id: 6,
             freq_hz: 30.0,
-            weight_decay: 0.0,
+            weight_decay: 0.0001,
+            precision_eta: 0.005,
+            surprise_threshold: 2.0,
+            top_down_weight: 0.0, // L6 is the top — no layer above
         },
         _ => LayerParams {
             threshold: 0.1,
@@ -284,6 +333,9 @@ pub fn default_params(layer_id: u8) -> LayerParams {
             layer_id,
             freq_hz: 10.0,
             weight_decay: 0.0001,
+            precision_eta: 0.01,
+            surprise_threshold: 2.0,
+            top_down_weight: 0.3,
         },
     }
 }
@@ -384,7 +436,9 @@ pub fn run_layer(layer_id: u8, name: &str) {
     });
 
     let params = default_params(layer_id);
-    let cuda = CudaContext::new(&params).unwrap_or_else(|e| {
+    // Phase 5.1: layers 0-5 have a layer above; L6 (sensor) is the top
+    let has_above = (layer_id as usize) < NUM_LAYERS - 1;
+    let cuda = CudaContext::new(&params, has_above).unwrap_or_else(|e| {
         panic!("qualia-{name}: CUDA init failed: {e}");
     });
     eprintln!("qualia-{name}: {}", cuda.device_name());
@@ -398,6 +452,13 @@ pub fn run_layer(layer_id: u8, name: &str) {
         shm.layer_slot(NUM_LAYERS - 1)
     };
     let reader = LayerReader::new(below_slot);
+
+    // Phase 5.1: reader for the layer ABOVE (for top-down prediction errors)
+    let above_reader = if has_above {
+        Some(LayerReader::new(shm.layer_slot((layer_id + 1) as usize)))
+    } else {
+        None
+    };
 
     let tick_duration = if params.freq_hz > 0.0 {
         Duration::from_secs_f64(1.0 / params.freq_hz)
@@ -490,9 +551,13 @@ pub fn run_layer(layer_id: u8, name: &str) {
         eprintln!("qualia-{name}: semantic injection alpha={semantic_alpha}");
     }
 
+    if has_above {
+        eprintln!("qualia-{name}: top-down from L{} (weight={:.2})", layer_id + 1, params.top_down_weight);
+    }
+
     eprintln!(
-        "qualia-{name}: running at {:.1} Hz with 64x64 generative model (CUDA)",
-        params.freq_hz
+        "qualia-{name}: running at {:.1} Hz, prec_eta={:.3}, surprise_gate={:.1} (CUDA)",
+        params.freq_hz, params.precision_eta, params.surprise_threshold
     );
 
     let mut last_thought = Instant::now();
@@ -543,6 +608,9 @@ pub fn run_layer(layer_id: u8, name: &str) {
 
         let below = *reader.read();
 
+        // Phase 5.1: Read belief from the layer above (if it exists)
+        let above_belief = above_reader.as_ref().map(|r| *r.read());
+
         let (weights, bias) = unsafe {
             let slot_ptr =
                 my_slot as *const qualia_types::LayerSlot as *mut qualia_types::LayerSlot;
@@ -551,7 +619,13 @@ pub fn run_layer(layer_id: u8, name: &str) {
 
         let buf = writer.back_buffer();
         buf.layer = layer_id;
-        cuda.dispatch_belief_update(buf, &below, weights, bias);
+        cuda.dispatch_belief_update(
+            buf,
+            &below,
+            above_belief.as_ref(),
+            weights,
+            bias,
+        );
 
         // Semantic injection (identical to Metal backend)
         if has_injection {

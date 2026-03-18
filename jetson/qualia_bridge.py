@@ -52,6 +52,10 @@ MAX_LORE_QUESTION = 256
 MAX_LORE_ENTRIES = 128
 MAX_QUESTION_TEXT = 256
 
+# Phase 3.2: Action history
+MAX_ACTION_ENTRIES = 256
+ACTION_ENTRY_SIZE = 96  # u8+3pad+i16+i16+f32+f32+16*f32+u64+u64
+
 
 # ── Data classes ─────────────────────────────────────────────────────
 
@@ -68,6 +72,11 @@ class BeliefSlot:
     layer: int
     timestamp_ns: int
     cycle_us: int
+    # Phase 1.2: VFE surprise detection
+    vfe_ema: float = 0.0
+    vfe_var: float = 0.0
+    # Phase 1.4: Information-theoretic compression ratio
+    compression_ratio: float = 0.0
 
 
 @dataclass
@@ -115,6 +124,19 @@ class LoreEntry:
     reason: int
     embedding_delta: float
     effectiveness: float
+    timestamp_ns: int
+    seq: int
+
+
+@dataclass
+class ActionEntry:
+    """An action the system took, with before/after VFE."""
+    action: int          # 0=stop, 1=forward, 2=left, 3=right, 4=reverse
+    speed_left: int
+    speed_right: int
+    pre_vfe: float
+    post_vfe: float
+    embedding: list      # [f32; 16] compressed embedding
     timestamp_ns: int
     seq: int
 
@@ -245,6 +267,10 @@ class QualiaBridge:
 
         # timestamp_ns: u64, cycle_us: u32, _pad2: [u8;4]
         timestamp_ns, cycle_us = struct.unpack_from("<QI", mm, pos)
+        pos += 8 + 4 + 4  # u64 + u32 + 4-byte pad
+
+        # Phase 1.2/1.4: New fields (vfe_ema, vfe_var, compression_ratio)
+        vfe_ema, vfe_var, compression_ratio = struct.unpack_from("<fff", mm, pos)
 
         return BeliefSlot(
             mean=mean,
@@ -258,6 +284,9 @@ class QualiaBridge:
             layer=layer,
             timestamp_ns=timestamp_ns,
             cycle_us=cycle_us,
+            vfe_ema=vfe_ema,
+            vfe_var=vfe_var,
+            compression_ratio=compression_ratio,
         )
 
     # ── Layer readers ────────────────────────────────────────────────
@@ -462,21 +491,111 @@ class QualiaBridge:
 
         return lore
 
+    # ── VFE z-score (Phase 1.2) ─────────────────────────────────────
+
+    def vfe_zscore(self, layer: int) -> float:
+        """Compute the VFE z-score for a layer: (vfe - ema) / sqrt(var).
+        A z-score > 3 is a genuine surprise event."""
+        b = self.read_layer_belief(layer)
+        std = max(b.vfe_var, 1e-8) ** 0.5
+        return (b.vfe - b.vfe_ema) / std if std > 0 else 0.0
+
+    # ── ActionHistory reader (Phase 3.2) ─────────────────────────────
+
+    def read_recent_actions(self, count: int = 20) -> list:
+        """Read the N most recent action entries from the ring buffer."""
+        mm = self._mm
+        # ActionHistory offset: compute from LoreBuffer end
+        # This must match ACTION_HISTORY_OFFSET in shm/src/lib.rs
+        # = LORE_BUFFER_OFFSET + sizeof(LoreBuffer)
+        # LoreBuffer = 8 (write_seq) + 128 * LORE_ENTRY_SIZE
+        ah_offset = LORE_BUFFER_OFFSET + 8 + MAX_LORE_ENTRIES * LORE_ENTRY_SIZE
+
+        write_seq = struct.unpack_from("<Q", mm, ah_offset)[0]
+        if write_seq == 0:
+            return []
+
+        entries_offset = ah_offset + 8  # skip write_seq
+
+        actions = []
+        start = max(0, write_seq - count)
+
+        for seq in range(start, write_seq):
+            idx = seq % MAX_ACTION_ENTRIES
+            entry_offset = entries_offset + idx * ACTION_ENTRY_SIZE
+            pos = entry_offset
+
+            action = struct.unpack_from("<B", mm, pos)[0]
+            pos += 4  # action(1) + pad(3)
+            speed_left, speed_right = struct.unpack_from("<hh", mm, pos)
+            pos += 4
+            pre_vfe, post_vfe = struct.unpack_from("<ff", mm, pos)
+            pos += 8
+            embedding = list(struct.unpack_from("<16f", mm, pos))
+            pos += 64
+            timestamp_ns, entry_seq = struct.unpack_from("<QQ", mm, pos)
+
+            if entry_seq == seq:
+                actions.append(ActionEntry(
+                    action=action,
+                    speed_left=speed_left,
+                    speed_right=speed_right,
+                    pre_vfe=pre_vfe,
+                    post_vfe=post_vfe,
+                    embedding=embedding,
+                    timestamp_ns=timestamp_ns,
+                    seq=entry_seq,
+                ))
+
+        return actions
+
+    # ── Write action entry to SHM ────────────────────────────────────
+
+    def write_action(self, action: int, speed_left: int, speed_right: int,
+                     pre_vfe: float, post_vfe: float, embedding: list):
+        """Write an action entry to the ActionHistory ring buffer."""
+        if not self._mm:
+            return
+
+        ah_offset = LORE_BUFFER_OFFSET + 8 + MAX_LORE_ENTRIES * LORE_ENTRY_SIZE
+        # Increment write_seq atomically (best-effort in Python)
+        write_seq = struct.unpack_from("<Q", self._mm, ah_offset)[0]
+        struct.pack_into("<Q", self._mm, ah_offset, write_seq + 1)
+
+        entries_offset = ah_offset + 8
+        idx = write_seq % MAX_ACTION_ENTRIES
+        entry_offset = entries_offset + idx * ACTION_ENTRY_SIZE
+        pos = entry_offset
+
+        # Pack entry
+        struct.pack_into("<B3x", self._mm, pos, action)
+        pos += 4
+        struct.pack_into("<hh", self._mm, pos, speed_left, speed_right)
+        pos += 4
+        struct.pack_into("<ff", self._mm, pos, pre_vfe, post_vfe)
+        pos += 8
+        emb_padded = (embedding + [0.0] * 16)[:16]
+        struct.pack_into("<16f", self._mm, pos, *emb_padded)
+        pos += 64
+        timestamp_ns = int(time.time() * 1e9)
+        struct.pack_into("<QQ", self._mm, pos, timestamp_ns, write_seq)
+
     # ── High-level summaries for voice assistant ─────────────────────
 
     def get_beliefs_summary(self) -> str:
         """Human-readable summary of all layer beliefs."""
-        layers = self.read_all_layers()
         lines = ["Qualia belief state:"]
         layer_names = [
             "L0 superposition", "L1 motor", "L2 local",
             "L3 visual", "L4 behavior", "L5 deep", "L6 sensor",
         ]
-        for s in layers:
-            status = "CHALLENGED" if s.is_challenged else f"stable (streak={s.confirm_streak})"
+        for i in range(NUM_LAYERS):
+            b = self.read_layer_belief(i)
+            z = self.vfe_zscore(i)
+            status = f"z={z:.1f}" if abs(z) > 1.0 else f"stable (streak={b.confirm_streak})"
             lines.append(
-                f"  {layer_names[s.layer_id]}: VFE={s.vfe:.4f}, comp={s.compression}, "
-                f"{status}, {s.cycle_us}us/cycle"
+                f"  {layer_names[i]}: VFE={b.vfe:.4f} (ema={b.vfe_ema:.4f}), "
+                f"comp_r={b.compression_ratio:.2f}, {status}, {b.cycle_us}us/cycle"
             )
         return "\n".join(lines)
 

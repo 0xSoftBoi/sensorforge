@@ -164,6 +164,14 @@ pub struct BeliefSlot {
     pub timestamp_ns: u64,
     pub cycle_us: u32,
     pub _pad2: [u8; 4],
+    /// VFE exponential moving average — tracks "normal" VFE for this layer.
+    /// Used for z-score surprise detection: z = (vfe - vfe_ema) / sqrt(vfe_var)
+    pub vfe_ema: f32,
+    /// VFE variance (EMA of squared deviations). For z-score computation.
+    pub vfe_var: f32,
+    /// Information-theoretic compression ratio: H(prediction) / H(observation).
+    /// Replaces the streak-based u8 compression counter for meaningful metric.
+    pub compression_ratio: f32,
 }
 
 /// Weight dimensions for the generative model.
@@ -190,6 +198,41 @@ pub struct LayerSlot {
     pub challenge_total: AtomicU64,
     /// Question slot — layer writes here when it needs outside help.
     pub question: QuestionSlot,
+}
+
+// ── Action History (Phase 3.2: sensorimotor contingencies) ──────────
+
+pub const MAX_ACTION_ENTRIES: usize = 256;
+
+/// An action the system took, with before/after VFE and embedding snapshot.
+/// Used by EFE explorer to predict action outcomes and by layers to learn
+/// sensorimotor contingencies.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ActionEntry {
+    /// Action code: 0=stop, 1=forward, 2=left, 3=right, 4=reverse
+    pub action: u8,
+    pub _pad0: [u8; 3],
+    /// Motor speeds at time of action
+    pub speed_left: i16,
+    pub speed_right: i16,
+    /// Mean VFE across layers BEFORE the action
+    pub pre_vfe: f32,
+    /// Mean VFE across layers AFTER the action (measured ~1s later)
+    pub post_vfe: f32,
+    /// Scene embedding snapshot at time of action (compressed to 16 dims)
+    pub embedding: [f32; 16],
+    /// Timestamp when action was taken
+    pub timestamp_ns: u64,
+    /// Sequence number
+    pub seq: u64,
+}
+
+/// Ring buffer of action history, written by explorer, readable by all layers.
+#[repr(C)]
+pub struct ActionHistory {
+    pub write_seq: AtomicU64,
+    pub entries: [ActionEntry; MAX_ACTION_ENTRIES],
 }
 
 #[repr(u8)]
@@ -257,9 +300,11 @@ mod tests {
         // + u32 (confirm_streak) + u8 (compression) + u8 (layer) + 2 pad = 8
         // + u64 (timestamp_ns) = 8
         // + u32 (cycle_us) + 4 pad = 8
-        // total = 1056, rounded up to 64-byte alignment = 1088
+        // + 3 floats (vfe_ema, vfe_var, compression_ratio) = 12
+        // total = 1068, rounded up to 64-byte alignment = 1088
         let size = mem::size_of::<BeliefSlot>();
         assert!(size % 64 == 0, "BeliefSlot size {size} not 64-byte aligned");
+        assert_eq!(size, 1088, "BeliefSlot size changed — update CUDA kernel struct and Python bridge");
     }
 
     #[test]

@@ -152,31 +152,63 @@ fn run_offline_loop(shm: &ShmRegion) {
     }
 }
 
-/// Online mode: capture frames, call Gemini Vision + Embedding APIs.
+/// Online mode: Gemini demoted to LORE oracle (Phase 2.4).
+///
+/// Primary perception is handled by local YOLO + local embeddings
+/// (qualia_detect.py + qualia_embed.py). Gemini is called ONLY when:
+/// 1. Layers pose questions via QuestionSlot (hard semantic reasoning)
+/// 2. Minimum interval has passed since last call
+/// 3. Budget hasn't been exhausted
+///
+/// This dramatically reduces API costs while keeping Gemini available
+/// for the questions that local models can't answer.
 fn run_vision_loop(shm: &ShmRegion, api_key: &str, interval_secs: u64, max_calls: u64) {
     let world = shm.world_model_mut();
     set_default_directive(world);
 
+    // Check if local detection/embedding services are running
+    let local_detect_available = std::path::Path::new("/tmp/qualia_detections.json").exists();
+    if local_detect_available {
+        eprintln!("qualia-vision: local detection active — Gemini demoted to LORE oracle");
+    } else {
+        eprintln!("qualia-vision: no local detection — Gemini handles both perception + LORE");
+    }
+
     shm.emit_thought(255, 0, 0.0, &format!(
-        "vision: gemini online, budget={}, interval={}s",
-        max_calls, interval_secs
+        "vision: gemini=LORE oracle, budget={}, local_detect={}",
+        max_calls, local_detect_available
     ));
 
     let mut last_llm = Instant::now() - Duration::from_secs(interval_secs + 1);
     let mut calls_made: u64 = 0;
     let mut budget_exhausted = false;
+    let mut last_detect_check = Instant::now();
 
     loop {
         let now = Instant::now();
-        let elapsed = now.duration_since(last_llm).as_secs();
+        let elapsed_since_llm = now.duration_since(last_llm).as_secs();
 
-        if !budget_exhausted
-            && elapsed >= interval_secs
-        {
-            eprintln!("qualia-vision: triggering capture ({}s since last)", elapsed);
-            last_llm = now;
+        // Phase 2.4: Check for local detections (written by qualia_detect.py)
+        if now.duration_since(last_detect_check).as_millis() > 500 {
+            last_detect_check = now;
+            read_local_detections(world);
+        }
 
-            let _remaining = max_calls - calls_made;
+        // Harvest pending questions from layers
+        let pending_questions = harvest_questions(shm);
+        let has_questions = !pending_questions.is_empty();
+
+        // Phase 2.4: Gemini called ONLY when layers have questions
+        // OR when there are no local services and the interval has passed
+        let should_call_gemini = !budget_exhausted && elapsed_since_llm >= interval_secs
+            && (has_questions || !local_detect_available);
+
+        if should_call_gemini {
+            eprintln!(
+                "qualia-vision: Gemini call ({}s elapsed, {} questions, local={})",
+                elapsed_since_llm, pending_questions.len(), local_detect_available
+            );
+            last_llm = Instant::now();
 
             match capture_frame() {
                 Ok(jpeg_data) => {
@@ -187,59 +219,49 @@ fn run_vision_loop(shm: &ShmRegion, api_key: &str, interval_secs: u64, max_calls
 
                     let directive = read_cstr(&world.directive);
 
-                    // Step 0: Harvest pending questions from layers
-                    let pending_questions = harvest_questions(shm);
-
-                    // Step 1: Gemini Vision — understand the scene
-                    eprintln!("qualia-vision: calling Gemini Vision API ({}B image)...", b64.len());
+                    // Call Gemini Vision
                     match call_gemini_vision(api_key, &b64, &directive, &pending_questions) {
                         Ok((response, vision_usage)) => {
-                            // Track vision API tokens
                             world.gemini_input_tokens += vision_usage.input_tokens;
                             world.gemini_output_tokens += vision_usage.output_tokens;
 
                             let obj_names: Vec<&str> = response.objects.iter()
                                 .map(|o| o.name.as_str())
                                 .collect();
+
+                            // Only update scene/objects from Gemini if no local detection
+                            if !local_detect_available {
+                                apply_vision_response(world, &response);
+                            }
+
                             shm.emit_thought(255, 0, 0.0, &format!(
-                                "gemini vision #{}: {} obj={} [{}]",
+                                "gemini LORE #{}: {} [{}] q={}",
                                 calls_made + 1,
-                                &response.scene[..response.scene.len().min(80)],
-                                response.objects.len(),
-                                obj_names.join(",")
+                                &response.scene[..response.scene.len().min(60)],
+                                obj_names.join(","),
+                                pending_questions.len()
                             ));
 
-                            apply_vision_response(world, &response);
-
-                            // Step 2: Gemini Embedding — generate a real semantic
-                            // embedding from the scene description. This is what
-                            // teaches the lower layers what to expect.
-                            let embed_text = format!(
-                                "{} {} {}",
-                                response.scene, response.activity,
-                                obj_names.join(" ")
-                            );
-                            match call_gemini_embedding(api_key, &embed_text) {
-                                Ok((embedding, embed_tokens)) => {
-                                    // Track embedding API tokens
-                                    world.gemini_embedding_tokens += embed_tokens;
-
-                                    // Project the embedding into our 64-dim space
-                                    project_embedding_to_scene(world, &embedding);
-                                    let emb_norm: f32 = embedding.iter().map(|v| v * v).sum::<f32>().sqrt();
-                                    shm.emit_thought(255, 3, 0.0, &format!(
-                                        "embedding: {}d, norm={:.3}, projected to 64d",
-                                        embedding.len(), emb_norm
-                                    ));
-                                }
-                                Err(e) => {
-                                    // Fall back to hash-based embedding
-                                    eprintln!("qualia-vision: embedding API error: {e}");
-                                    generate_hash_embedding(world, &response);
+                            // Embedding: use Gemini only if no local embedder
+                            if !std::path::Path::new("/tmp/qualia_detections.json").exists() {
+                                let embed_text = format!(
+                                    "{} {} {}",
+                                    response.scene, response.activity,
+                                    obj_names.join(" ")
+                                );
+                                match call_gemini_embedding(api_key, &embed_text) {
+                                    Ok((embedding, embed_tokens)) => {
+                                        world.gemini_embedding_tokens += embed_tokens;
+                                        project_embedding_to_scene(world, &embedding);
+                                    }
+                                    Err(e) => {
+                                        eprintln!("qualia-vision: embedding API error: {e}");
+                                        generate_hash_embedding(world, &response);
+                                    }
                                 }
                             }
 
-                            // Step 3: Answer layer questions → LORE
+                            // Answer layer questions → LORE (the primary reason for calling)
                             if !pending_questions.is_empty() && !response.lore_answers.is_empty() {
                                 let old_emb: [f32; STATE_DIM] = world.scene_embedding;
                                 for (i, answer) in response.lore_answers.iter().enumerate() {
@@ -269,40 +291,31 @@ fn run_vision_loop(shm: &ShmRegion, api_key: &str, interval_secs: u64, max_calls
                             );
 
                             eprintln!(
-                                "qualia-vision: Gemini call #{}/{} — {} objects",
-                                calls_made, max_calls, world.num_objects
+                                "qualia-vision: Gemini #{}/{} — {} LORE answers",
+                                calls_made, max_calls, response.lore_answers.len()
                             );
 
                             if calls_made >= max_calls {
                                 budget_exhausted = true;
                                 shm.emit_thought(255, 5, 0.0, &format!(
-                                    "budget exhausted: {}/{} calls, sensor-only mode",
+                                    "budget exhausted: {}/{} calls",
                                     calls_made, max_calls
                                 ));
-                                eprintln!(
-                                    "qualia-vision: Gemini budget exhausted ({}/{}). Continuing with sensor data only.",
-                                    calls_made, max_calls
-                                );
                             }
                         }
                         Err(e) => {
-                            eprintln!("qualia-vision: Gemini vision error: {}", e);
-                            shm.emit_thought(255, 5, 0.0, &format!(
-                                "vision err: {}", e
-                            ));
+                            eprintln!("qualia-vision: Gemini error: {}", e);
+                            shm.emit_thought(255, 5, 0.0, &format!("gemini err: {}", e));
                         }
                     }
                 }
                 Err(e) => {
                     eprintln!("qualia-vision: capture error: {}", e);
-                    shm.emit_thought(255, 5, 0.0, &format!(
-                        "capture err: {}", e
-                    ));
                 }
             }
         }
 
-        // Always update embedding from live sensor data between Gemini calls
+        // Always update embedding from live sensor data
         update_embedding_from_sensor(shm, world);
 
         std::thread::sleep(Duration::from_millis(200));
@@ -355,6 +368,77 @@ fn capture_frame() -> Result<Vec<u8>, String> {
     }
 
     Ok(output.stdout)
+}
+
+// ── Local Detection Reader (Phase 2.4) ──────────────────────────────
+
+/// Read local YOLO detections from /tmp/qualia_detections.json
+/// (written by qualia_detect.py at 1-5Hz).
+fn read_local_detections(world: &mut WorldModel) {
+    let path = "/tmp/qualia_detections.json";
+    let data = match std::fs::read_to_string(path) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+
+    let json: serde_json::Value = match serde_json::from_str(&data) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    // Check freshness (skip if older than 5 seconds)
+    if let Some(ts) = json["ts"].as_f64() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        if now - ts > 5.0 {
+            return;
+        }
+    }
+
+    // Update objects in world model
+    if let Some(objects) = json["objects"].as_array() {
+        world.num_objects = 0;
+        for obj in objects.iter().take(MAX_OBJECTS) {
+            let idx = world.num_objects as usize;
+            if let Some(name) = obj["name"].as_str() {
+                let name_bytes = name.as_bytes();
+                let name_len = name_bytes.len().min(MAX_OBJECT_NAME - 1);
+                world.objects[idx].name = [0u8; MAX_OBJECT_NAME];
+                world.objects[idx].name[..name_len].copy_from_slice(&name_bytes[..name_len]);
+                world.objects[idx].confidence = obj["confidence"].as_f64().unwrap_or(0.0) as f32;
+                world.objects[idx].x = obj["x"].as_f64().unwrap_or(0.5) as f32;
+                world.objects[idx].y = obj["y"].as_f64().unwrap_or(0.5) as f32;
+                world.objects[idx].active = 1;
+                world.num_objects += 1;
+            }
+        }
+
+        // Build scene description from detections
+        let names: Vec<String> = objects.iter()
+            .filter_map(|o| o["name"].as_str().map(|s| s.to_string()))
+            .collect();
+        if !names.is_empty() {
+            let desc = format!("local detect: {}\0", names.join(", "));
+            let bytes = desc.as_bytes();
+            let len = bytes.len().min(MAX_SCENE_LEN - 1);
+            world.scene[..len].copy_from_slice(&bytes[..len]);
+            world.scene[len] = 0;
+
+            world.activity = [0u8; MAX_ACTIVITY_LEN];
+            let act = format!("{} objects detected\0", names.len());
+            let act_bytes = act.as_bytes();
+            let act_len = act_bytes.len().min(MAX_ACTIVITY_LEN - 1);
+            world.activity[..act_len].copy_from_slice(&act_bytes[..act_len]);
+        }
+
+        world.vision_frame_count += 1;
+        world.update_seq.store(
+            world.update_seq.load(Ordering::Relaxed) + 1,
+            Ordering::Release,
+        );
+    }
 }
 
 // ── Gemini Vision API ───────────────────────────────────────────────

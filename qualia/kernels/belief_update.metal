@@ -17,55 +17,74 @@ struct BeliefSlot {
     ulong timestamp_ns;
     uint  cycle_us;
     uchar _pad2[4];
+    // New fields (fit within 1088-byte alignment padding)
+    float vfe_ema;
+    float vfe_var;
+    float compression_ratio;
 };
+
+// Sigmoid for precision-scaled learning
+float sigmoid_fn(float x) {
+    return 1.0f / (1.0f + exp(-x));
+}
 
 // params[0] = threshold
 // params[1] = learning_rate (belief update)
 // params[2] = layer_id
 // params[3] = weight_decay
+// params[4] = has_above (1.0 if above layer exists, 0.0 otherwise)
+// params[5] = precision_eta (precision learning rate)
+// params[6] = surprise_threshold (z-score for sparse gating)
+// params[7] = top_down_weight
 
 kernel void belief_update(
     device BeliefSlot*       me      [[buffer(0)]],
     const device BeliefSlot* below   [[buffer(1)]],
-    const device float*      params  [[buffer(2)]],
-    device float*            weights [[buffer(3)]],  // 64×64 generative model
-    device float*            bias    [[buffer(4)]],  // 64 bias
+    const device BeliefSlot* above   [[buffer(2)]],
+    const device float*      params  [[buffer(3)]],
+    device float*            weights [[buffer(4)]],
+    device float*            bias    [[buffer(5)]],
     uint tid [[thread_position_in_grid]]
 )
 {
     if (tid >= 64) return;
 
-    float threshold    = params[0];
-    float lr           = params[1];
-    float weight_decay = params[3];
-    float lr_w         = lr * 0.1;  // weight learning rate (10x slower than belief)
+    float threshold     = params[0];
+    float lr            = params[1];
+    float weight_decay  = params[3];
+    float has_above     = params[4];
+    float prec_eta      = params[5];
+    float surprise_gate = params[6];
+    float td_weight     = params[7];
+    float lr_w          = lr * 0.1f;
 
-    // ── Cache my mean in threadgroup memory for matrix multiply ──
     threadgroup float shared_mean[64];
     shared_mean[tid] = me->mean[tid];
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // ── 1. PREDICT: prediction = W @ mean + bias ──
-    // Each thread computes one element of the prediction vector.
-    // This IS the generative model — W encodes what this layer
-    // has learned about how its beliefs map to the layer below.
+    // 1. PREDICT
     float pred = bias[tid];
     for (uint j = 0; j < 64; j++) {
         pred += weights[tid * 64 + j] * shared_mean[j];
     }
     me->prediction[tid] = pred;
 
-    // ── 2. RESIDUAL (prediction error) ──
-    // The surprise: what the world actually looks like vs what we predicted.
+    // 2. BOTTOM-UP RESIDUAL
     float residual = below->mean[tid] - pred;
     me->residual[tid] = residual;
 
-    // ── 3. PRECISION-WEIGHTED SQUARED ERROR ──
+    // 2b. TOP-DOWN ERROR (Phase 5.1)
+    float error_down = 0.0f;
+    if (has_above > 0.5f) {
+        error_down = above->prediction[tid] - me->mean[tid];
+    }
+
+    // 3. PRECISION-WEIGHTED SQUARED ERROR
     float prec = me->precision[tid];
     float clamped_res = clamp(residual, -10.0f, 10.0f);
     float weighted = clamped_res * min(prec, 10.0f) * clamped_res;
 
-    // ── 4. VFE reduction (sum across all dimensions) ──
+    // 4. VFE reduction
     threadgroup float shared_vfe[64];
     shared_vfe[tid] = weighted;
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -79,7 +98,22 @@ kernel void belief_update(
 
     float total_vfe = shared_vfe[0];
 
-    // ── 5. Thread 0: update scalar fields ──
+    // 4b. Compression ratio entropy proxies
+    threadgroup float shared_pred_abs[64];
+    threadgroup float shared_obs_abs[64];
+    shared_pred_abs[tid] = abs(pred);
+    shared_obs_abs[tid] = abs(below->mean[tid]);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint s = 32; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_pred_abs[tid] += shared_pred_abs[tid + s];
+            shared_obs_abs[tid] += shared_obs_abs[tid + s];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // 5. Thread 0: scalar fields
     if (tid == 0) {
         me->challenge_vfe = total_vfe;
         me->vfe = total_vfe;
@@ -95,53 +129,72 @@ kernel void belief_update(
                 me->compression -= 1;
             }
         }
+
+        // VFE EMA + variance (Phase 1.2)
+        float ema_alpha = 0.02f;
+        float old_ema = me->vfe_ema;
+        me->vfe_ema = old_ema + ema_alpha * (total_vfe - old_ema);
+        float vfe_dev = total_vfe - me->vfe_ema;
+        me->vfe_var = me->vfe_var + ema_alpha * (vfe_dev * vfe_dev - me->vfe_var);
+
+        // Compression ratio (Phase 1.4)
+        float pred_energy = shared_pred_abs[0];
+        float obs_e = shared_obs_abs[0];
+        if (obs_e > 0.001f) {
+            float ratio = pred_energy / obs_e;
+            me->compression_ratio = me->compression_ratio * 0.95f + ratio * 0.05f;
+        }
     }
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // ── 6. BELIEF UPDATE: gradient descent on free energy ──
-    // Move mean toward the sensory evidence, scaled by precision.
-    // Clamp the effective precision to prevent explosive updates when
-    // a sudden embedding injection hits a high-precision layer.
+    // Surprise gating (Phase 5.2)
+    float vfe_std = sqrt(max(me->vfe_var, 1e-8f));
+    float z_score = (total_vfe - me->vfe_ema) / vfe_std;
+    bool is_surprising = (z_score > surprise_gate) || (total_vfe > threshold);
+
+    // 6. BELIEF UPDATE with sigmoid precision (Phase 1.1)
     if (total_vfe > threshold) {
-        float eff_prec = min(prec, 1.0f);  // cap effective precision for update
-        float delta = lr * eff_prec * residual;
-        delta = clamp(delta, -0.1f, 0.1f);  // max step per cycle
+        float prec_gate = 1.0f - sigmoid_fn(prec - 1.0f);
+        float eff_lr = lr * (0.2f + 0.8f * prec_gate);
+
+        float delta_up = eff_lr * residual;
+        float delta_down = 0.0f;
+        if (has_above > 0.5f) {
+            float td_prec_gate = sigmoid_fn(prec - 1.0f);
+            delta_down = eff_lr * td_weight * td_prec_gate * error_down;
+        }
+
+        float delta = clamp(delta_up + delta_down, -0.1f, 0.1f);
         me->mean[tid] += delta;
         me->mean[tid] = clamp(me->mean[tid], -10.0f, 10.0f);
     }
 
-    // ── 7. WEIGHT LEARNING: update generative model ──
-    // W += lr_w * outer(precision * residual, mean)
-    // Each thread updates its row of W (64 weights).
-    // Uses the CACHED pre-update mean — the belief that generated the prediction.
-    if (total_vfe > threshold) {
-        float eff_prec_w = min(prec, 1.0f);
-        float grad_scale = clamp(lr_w * eff_prec_w * residual, -0.01f, 0.01f);
+    // 7. WEIGHT LEARNING (surprise-gated)
+    if (is_surprising && total_vfe > threshold) {
+        float prec_gate = 1.0f - sigmoid_fn(prec - 1.0f);
+        float eff_lr_w = lr_w * (0.2f + 0.8f * prec_gate);
+        float grad_scale = clamp(eff_lr_w * residual, -0.01f, 0.01f);
         for (uint j = 0; j < 64; j++) {
-            // Weight decay prevents unbounded growth
             weights[tid * 64 + j] *= (1.0f - weight_decay);
-            // Gradient step
             weights[tid * 64 + j] += grad_scale * shared_mean[j];
-            // Clamp to prevent explosion
             weights[tid * 64 + j] = clamp(weights[tid * 64 + j], -10.0f, 10.0f);
         }
         bias[tid] *= (1.0f - weight_decay);
-        bias[tid] += clamp(lr_w * eff_prec_w * residual, -0.01f, 0.01f);
+        bias[tid] += clamp(eff_lr_w * residual, -0.01f, 0.01f);
         bias[tid] = clamp(bias[tid], -10.0f, 10.0f);
     }
 
-    // ── NaN guard: if VFE is NaN, reset this dimension ──
+    // NaN guard
     if (isnan(me->mean[tid]) || isinf(me->mean[tid])) {
-        me->mean[tid] = below->mean[tid];  // reset to sensory input
-        me->precision[tid] = 0.01f;        // reset precision
+        me->mean[tid] = below->mean[tid];
+        me->precision[tid] = 0.01f;
     }
 
-    // ── 8. PRECISION UPDATE: adapt confidence based on prediction accuracy ──
-    float abs_res = abs(residual);
-    if (abs_res < 0.01f) {
-        me->precision[tid] = min(prec * 1.001f, 10.0f);  // lower cap: 10 not 100
-    } else {
-        me->precision[tid] = max(prec * 0.999f, 0.01f);
-    }
+    // 8. PRECISION UPDATE (Phase 1.1): free-energy gradient
+    float res_sq = clamped_res * clamped_res;
+    float inv_prec = 1.0f / max(prec, 0.01f);
+    float prec_grad = inv_prec - res_sq;
+    float new_prec = prec + prec_eta * prec_grad;
+    me->precision[tid] = clamp(new_prec, 0.01f, 10.0f);
 }
