@@ -17,15 +17,17 @@ use std::time::{Duration, Instant};
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
 /// Runners spawned by the supervisor. Does NOT include qualia-watch (that's us).
+/// Spawn order matters: camera + L6 (sensor) first, then layers top-down
+/// so each layer's "above" reader finds initialized data in the layer above.
 static RUNNER_NAMES: &[&str] = &[
     "qualia-camera",
-    "qualia-l0-superposition",
-    "qualia-l1-belief",
-    "qualia-l2-belief",
-    "qualia-l3-belief",
-    "qualia-l4-behavior",
-    "qualia-l5-behavior",
     "qualia-l6-semantic",
+    "qualia-l5-behavior",
+    "qualia-l4-behavior",
+    "qualia-l3-belief",
+    "qualia-l2-belief",
+    "qualia-l1-belief",
+    "qualia-l0-superposition",
     "qualia-health",
     "qualia-vision",
     "qualia-agent",
@@ -371,7 +373,18 @@ fn spawn_runners(shm_name: &str) -> Vec<(String, Child)> {
 
     let mut children: Vec<(String, Child)> = Vec::new();
 
+    // Stagger layer starts: camera+L6 first, then layers top-down so each
+    // layer's "above" reader finds an initialized buffer. This prevents the
+    // CUDA MPS race where L1/L5 crash reading uninitialized above-layer data.
+    let mut batch_prev = false;
     for name in RUNNER_NAMES {
+        // Small delay between layer runners to let each initialize its SHM slot
+        let is_layer = name.starts_with("qualia-l");
+        if is_layer && batch_prev {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        batch_prev = is_layer;
+
         let bin_path = bin_dir.join(name);
         let mut cmd = Command::new(&bin_path);
         let log_path = format!("/tmp/{}.log", name);
@@ -391,6 +404,7 @@ fn spawn_runners(shm_name: &str) -> Vec<(String, Child)> {
             "QUALIA_WEB_PORT",
             "QUALIA_LLM_INTERVAL",
             "QUALIA_LLM_MAX_CALLS",
+            "QUALIA_CHECKPOINT_DIR",
         ] {
             if let Ok(val) = std::env::var(key) {
                 cmd.env(key, val);
