@@ -1,0 +1,132 @@
+{
+  "protocol": "sensorforge-bridge",
+  "version": 1,
+  "description": "WiFi bridge protocol between iPhone (SensorForge) and Jetson (voice assistant + Qualia)",
+  "transport": "TCP with length-prefixed JSON messages",
+  "framing": "4-byte big-endian length prefix + UTF-8 JSON payload",
+  "discovery": "mDNS/Bonjour: _sensorforge._tcp.local. port 9876",
+
+  "messages": {
+    "handshake": {
+      "direction": "client → server",
+      "description": "Initial connection from iPhone",
+      "fields": {
+        "type": "handshake",
+        "device_name": "string — iPhone model name",
+        "device_id": "string — UUID for this device",
+        "protocol_version": "int — must be 1",
+        "sensors_available": ["string — list of sensor types available"],
+        "timestamp_ns": "int — device monotonic nanoseconds"
+      }
+    },
+
+    "handshake_ack": {
+      "direction": "server → client",
+      "description": "Jetson acknowledges connection",
+      "fields": {
+        "type": "handshake_ack",
+        "server_name": "string — Jetson hostname",
+        "qualia_active": "bool — whether Qualia engine is running",
+        "clock_offset_ns": "int — estimated clock offset (server - client)",
+        "timestamp_ns": "int — server monotonic nanoseconds"
+      }
+    },
+
+    "sensor_frame": {
+      "direction": "client → server",
+      "description": "Decimated sensor data from iPhone (sent at ~10Hz)",
+      "fields": {
+        "type": "sensor_frame",
+        "seq": "int — frame sequence number",
+        "timestamp_ns": "int — device monotonic nanoseconds",
+        "imu": {
+          "accel": [0.0, 0.0, 0.0],
+          "gyro": [0.0, 0.0, 0.0],
+          "mag": [0.0, 0.0, 0.0]
+        },
+        "pose": {
+          "position": [0.0, 0.0, 0.0],
+          "rotation": [0.0, 0.0, 0.0, 1.0],
+          "tracking_state": "string — normal|limited|notAvailable"
+        },
+        "gps": {
+          "lat": 0.0,
+          "lon": 0.0,
+          "alt": 0.0,
+          "accuracy": 0.0
+        },
+        "barometer": {
+          "pressure_hpa": 0.0,
+          "relative_altitude_m": 0.0
+        },
+        "ambient_light": 0.0
+      }
+    },
+
+    "status_request": {
+      "direction": "client → server",
+      "description": "iPhone requests current robot/Qualia status",
+      "fields": {
+        "type": "status_request"
+      }
+    },
+
+    "status_response": {
+      "direction": "server → client",
+      "description": "Jetson reports robot and Qualia status",
+      "fields": {
+        "type": "status_response",
+        "timestamp_ns": "int",
+        "voice_state": "string — idle|listening|processing|speaking",
+        "qualia": {
+          "active": "bool",
+          "layers": [
+            {
+              "id": "int",
+              "vfe": "float",
+              "compression": "int",
+              "challenged": "bool"
+            }
+          ],
+          "scene": "string — current scene description",
+          "directive": "string — current directive"
+        },
+        "ugv": {
+          "battery_v": "float",
+          "moving": "bool"
+        }
+      }
+    },
+
+    "command": {
+      "direction": "client → server",
+      "description": "iPhone sends a command to the robot",
+      "fields": {
+        "type": "command",
+        "action": "string — one of: set_directive, move_forward, move_backward, turn_left, turn_right, stop, speak",
+        "params": "object — action-specific parameters"
+      }
+    },
+
+    "command_ack": {
+      "direction": "server → client",
+      "description": "Jetson acknowledges command execution",
+      "fields": {
+        "type": "command_ack",
+        "action": "string — echoed from command",
+        "success": "bool",
+        "result": "string — result message"
+      }
+    },
+
+    "clock_sync": {
+      "direction": "bidirectional",
+      "description": "Clock synchronization ping/pong for timestamp alignment",
+      "fields": {
+        "type": "clock_sync",
+        "client_ns": "int — client timestamp when sent",
+        "server_ns": "int — server timestamp when received (only in response)"
+      }
+    }
+  }
+}

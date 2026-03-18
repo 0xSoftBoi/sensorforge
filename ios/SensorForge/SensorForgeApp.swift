@@ -4,13 +4,15 @@ import SwiftUI
 struct SensorForgeApp: App {
     @StateObject private var engine = CaptureEngine()
     @StateObject private var ble = BLEBridge()
+    @StateObject private var bridge = WiFiBridge()
     @StateObject private var shakeDetector = ShakeDetector()
 
     var body: some Scene {
         WindowGroup {
-            MainCaptureView(engine: engine, ble: ble)
+            MainCaptureView(engine: engine, ble: ble, bridge: bridge)
                 .onAppear {
                     engine.setBLEBridge(ble)
+                    bridge.startBrowsing()
 
                     // Enable shake-to-toggle recording
                     shakeDetector.start {

@@ -3,6 +3,7 @@ import SwiftUI
 struct MainCaptureView: View {
     @ObservedObject var engine: CaptureEngine
     @ObservedObject var ble: BLEBridge
+    @ObservedObject var bridge: WiFiBridge
     @StateObject private var countdown = CountdownStarter()
     @State private var selectedDelay: Int = 0
     @State private var showBLESheet = false
@@ -56,6 +57,9 @@ struct MainCaptureView: View {
             SensorTile(label: "BARO", active: engine.baroActive, icon: "barometer")
             SensorTile(label: "AUDIO", active: engine.audioActive, icon: "waveform")
             SensorTile(label: "BLE", active: ble.connectedDevice != nil, icon: "antenna.radiowaves.left.and.right")
+            SensorTile(label: bridge.jetsonName.isEmpty ? "JETSON" : bridge.jetsonName.uppercased(),
+                        active: bridge.connectionState == .connected,
+                        icon: "cpu")
         }
     }
 
