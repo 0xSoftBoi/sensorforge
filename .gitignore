@@ -36,3 +36,14 @@ venv/
 
 # Session data (don't commit recordings)
 sessions/
+
+# Rust / Qualia
+qualia/target/
+*.cubin
+*.ptx
+
+# Node
+node_modules/
+
+# Jetson
+jetson/__pycache__/
