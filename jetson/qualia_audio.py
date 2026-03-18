@@ -35,6 +35,29 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 AUDIO_FEATURES_FILE = "/tmp/qualia_audio_features.json"
+
+
+def acquire_singleton(name):
+    """Ensure only one instance runs. Kill stale instance if found."""
+    pidfile = f"/tmp/qualia_{name}.pid"
+    try:
+        with open(pidfile) as f:
+            old_pid = int(f.read().strip())
+        os.kill(old_pid, 0)
+        log.warning(f"Killing stale {name} process (PID {old_pid})")
+        os.kill(old_pid, signal.SIGTERM)
+        time.sleep(1)
+        try:
+            os.kill(old_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError):
+        pass
+    with open(pidfile, "w") as f:
+        f.write(str(os.getpid()))
+    log.info(f"Singleton lock acquired: {pidfile} (PID {os.getpid()})")
+
+
 SAMPLE_RATE = 16000
 WINDOW_MS = 100  # 100ms windows at 10Hz
 N_FFT = 512
@@ -108,6 +131,8 @@ def main():
     parser.add_argument("--bands", type=int, default=32, help="Number of mel bands (32 or 64)")
     parser.add_argument("--hz", type=float, default=10.0, help="Update frequency")
     args = parser.parse_args()
+
+    acquire_singleton("audio")
 
     running = True
 

@@ -41,6 +41,27 @@ log = logging.getLogger(__name__)
 
 MOTOR_STATE_FILE = "/tmp/qualia_motor_state.json"
 
+
+def acquire_singleton(name):
+    """Ensure only one instance runs. Kill stale instance if found."""
+    pidfile = f"/tmp/qualia_{name}.pid"
+    try:
+        with open(pidfile) as f:
+            old_pid = int(f.read().strip())
+        os.kill(old_pid, 0)
+        log.warning(f"Killing stale {name} process (PID {old_pid})")
+        os.kill(old_pid, signal.SIGTERM)
+        time.sleep(1)
+        try:
+            os.kill(old_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError):
+        pass
+    with open(pidfile, "w") as f:
+        f.write(str(os.getpid()))
+    log.info(f"Singleton lock acquired: {pidfile} (PID {os.getpid()})")
+
 # Exploration parameters
 BASE_SPEED = 60
 VFE_SAFETY_THRESHOLD = 10.0   # emergency stop multiplier
@@ -439,6 +460,8 @@ def main():
     parser.add_argument("--port", default="/dev/ttyACM0", help="UGV serial port")
     parser.add_argument("--speed", type=int, default=BASE_SPEED, help="Base motor speed (0-128)")
     args = parser.parse_args()
+
+    acquire_singleton("explorer")
 
     explorer = AutonomousExplorer(port=args.port, speed=args.speed)
 

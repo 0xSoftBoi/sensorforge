@@ -38,6 +38,27 @@ SNAPSHOT_PATH = "/tmp/qualia-camera-latest.jpg"
 MODEL_LOCK_PATH = "/tmp/qualia_model_lock"
 DETECTION_OUTPUT = "/tmp/qualia_detections.json"
 
+
+def acquire_singleton(name):
+    """Ensure only one instance runs. Kill stale instance if found."""
+    pidfile = f"/tmp/qualia_{name}.pid"
+    try:
+        with open(pidfile) as f:
+            old_pid = int(f.read().strip())
+        os.kill(old_pid, 0)
+        log.warning(f"Killing stale {name} process (PID {old_pid})")
+        os.kill(old_pid, signal.SIGTERM)
+        time.sleep(1)
+        try:
+            os.kill(old_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError):
+        pass
+    with open(pidfile, "w") as f:
+        f.write(str(os.getpid()))
+    log.info(f"Singleton lock acquired: {pidfile} (PID {os.getpid()})")
+
 # SHM constants matching qualia_bridge.py
 MAX_OBJECTS = 16
 MAX_OBJECT_NAME = 32
@@ -293,6 +314,8 @@ def main():
     parser.add_argument("--model", default="yolo_nas_s", help="Model name")
     parser.add_argument("--no-shm", action="store_true", help="Skip SHM writes (JSON only)")
     args = parser.parse_args()
+
+    acquire_singleton("detect")
 
     hz = float(os.environ.get("QUALIA_DETECT_HZ", args.hz))
     interval = 1.0 / max(hz, 0.1)
