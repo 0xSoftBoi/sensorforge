@@ -23,6 +23,23 @@ brew install ffmpeg
 export GEMINI_API_KEY="your-key-here"
 ```
 
+### Jetson Orin Nano (CUDA)
+
+```bash
+# 1. Ensure JetPack 6.0+ is installed (includes CUDA toolkit)
+nvcc --version   # should show CUDA 12.x
+
+# 2. Install Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+
+# 3. Install ffmpeg
+sudo apt install ffmpeg
+
+# 4. Get a Google Gemini API key (optional — runs offline without it)
+export GEMINI_API_KEY="your-key-here"
+```
+
 ### Verify your setup
 
 ```bash
@@ -35,8 +52,7 @@ ffmpeg -version     # needs avfoundation support (macOS default)
 ## Quick Start
 
 ```bash
-# Clone and build
-git clone https://github.com/anthropics/qualia.git
+# From the SensorForge repo root
 cd qualia
 cargo build --release
 
