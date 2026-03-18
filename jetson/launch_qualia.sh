@@ -55,7 +55,11 @@ if systemctl is-active --quiet jetson-capture-images 2>/dev/null; then
 fi
 
 # Kill orphaned processes from previous runs
-pkill -f "qualia-watch|qualia-camera|session_recorder" 2>/dev/null || true
+pkill -f "session_recorder" 2>/dev/null || true
+pkill -f "qualia-watch" 2>/dev/null || true
+sleep 2
+# Free up the camera device
+fuser -k /dev/video0 2>/dev/null || true
 sleep 1
 
 # ── 1c. Checkpoint directory for weight persistence ─────────────

@@ -448,7 +448,7 @@ fn call_gemini_vision(
             ]
         }],
         "generationConfig": {
-            "maxOutputTokens": 2048,
+            "maxOutputTokens": 4096,
             "temperature": 0.1
         }
     });
