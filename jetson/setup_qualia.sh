@@ -81,12 +81,23 @@ fi
 
 # ── 6. Build ─────────────────────────────────────────────────────
 cd "$REPO_DIR/qualia"
-echo "Building qualia-cuda (limited to -j2 for 4GB RAM)..."
+
+echo "Building qualia-cuda backend..."
 cargo build -j2 --release -p qualia-cuda
 
-echo "Building qualia-l0-superposition with CUDA backend..."
-cargo build -j2 --release -p qualia-l0-superposition --no-default-features --features cuda
+echo "Building layer runners with CUDA backend..."
+for layer in l0-superposition l1-belief l2-belief l3-belief l4-behavior l5-behavior; do
+    echo "  qualia-$layer..."
+    cargo build -j2 --release -p "qualia-$layer" --no-default-features --features cuda
+done
+
+echo "Building non-layer runners..."
+for runner in qualia-camera qualia-health qualia-vision qualia-agent qualia-watch; do
+    echo "  $runner..."
+    cargo build -j2 --release -p "$runner"
+done
 
 echo ""
 echo "=== Build complete ==="
-echo "Run: cd $REPO_DIR/qualia && cargo run -p qualia-watch"
+echo "Run: ./jetson/launch_qualia.sh"
+echo "     ./jetson/launch_qualia.sh --record  (with training data)"

@@ -311,27 +311,26 @@ fn run_vision_loop(shm: &ShmRegion, api_key: &str, interval_secs: u64, max_calls
 
 /// Capture a single JPEG frame from the webcam via ffmpeg.
 fn capture_frame() -> Result<Vec<u8>, String> {
+    let device = std::env::var("CAMERA_DEVICE").unwrap_or_else(|_| {
+        if cfg!(target_os = "macos") { "0".into() }
+        else { "/dev/video0".into() }
+    });
+
     eprintln!("qualia-vision: calling ffmpeg...");
-    let output = Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-hide_banner",
-            "-loglevel", "error",
-            "-f", "avfoundation",
-            "-framerate", "30",
-            "-video_size", &format!("{}x{}", CAPTURE_W, CAPTURE_H),
-            "-i", "0",
-            "-frames:v", "1",
-            "-f", "image2",
-            "-c:v", "mjpeg",
-            "-q:v", "5",
-            "pipe:1",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("ffmpeg: {e}"))?;
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-y", "-hide_banner", "-loglevel", "error"]);
+    if cfg!(target_os = "macos") {
+        cmd.args(["-f", "avfoundation", "-framerate", "30",
+                  "-video_size", &format!("{}x{}", CAPTURE_W, CAPTURE_H), "-i", &device]);
+    } else {
+        cmd.args(["-f", "v4l2",
+                  "-video_size", &format!("{}x{}", CAPTURE_W, CAPTURE_H), "-i", &device]);
+    }
+    cmd.args(["-frames:v", "1", "-f", "image2", "-c:v", "mjpeg", "-q:v", "5", "pipe:1"])
+       .stdin(Stdio::null())
+       .stdout(Stdio::piped())
+       .stderr(Stdio::piped());
+    let output = cmd.output().map_err(|e| format!("ffmpeg: {e}"))?;
 
     eprintln!("qualia-vision: ffmpeg returned, status={}, stdout={}B", output.status, output.stdout.len());
 

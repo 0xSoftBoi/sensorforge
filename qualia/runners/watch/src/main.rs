@@ -18,7 +18,7 @@ static RUNNING: AtomicBool = AtomicBool::new(true);
 
 /// Runners spawned by the supervisor. Does NOT include qualia-watch (that's us).
 static RUNNER_NAMES: &[&str] = &[
-    // "qualia-camera" — disabled; vision runner captures directly to avoid device contention
+    "qualia-camera",
     "qualia-l0-superposition",
     "qualia-l1-belief",
     "qualia-l2-belief",
@@ -303,6 +303,7 @@ fn spawn_runners(shm_name: &str) -> Vec<(String, Child)> {
         // Pass through env vars that runners need
         for key in &[
             "GEMINI_API_KEY",
+            "CAMERA_DEVICE",
             "QUALIA_SOCK_PATH",
             "QUALIA_WEB_PORT",
             "QUALIA_LLM_INTERVAL",

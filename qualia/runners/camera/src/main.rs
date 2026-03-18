@@ -44,7 +44,11 @@ fn main() {
         }
         Err(e) => {
             eprintln!("qualia-camera: ffmpeg not available ({e})");
-            eprintln!("qualia-camera: install with: brew install ffmpeg");
+            if cfg!(target_os = "macos") {
+                eprintln!("qualia-camera: install with: brew install ffmpeg");
+            } else {
+                eprintln!("qualia-camera: install with: sudo apt install ffmpeg");
+            }
             eprintln!("qualia-camera: falling back to synthetic sensor data...");
             run_synthetic_loop(&writer);
         }
@@ -52,24 +56,22 @@ fn main() {
 }
 
 fn start_ffmpeg() -> Result<std::process::Child, std::io::Error> {
-    // Capture from macOS default camera (device "0")
-    // Scale to 8x8 grayscale, output raw bytes at 30fps
-    Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel", "error",
-            "-f", "avfoundation",
-            "-framerate", "30",
-            "-video_size", "640x480",
-            "-i", "0",
-            "-vf", "scale=8:8,format=gray",
-            "-f", "rawvideo",
-            "-r", "30",
-            "pipe:1",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    let device = std::env::var("CAMERA_DEVICE").unwrap_or_else(|_| {
+        if cfg!(target_os = "macos") { "0".into() }
+        else { "/dev/video0".into() }
+    });
+
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-hide_banner", "-loglevel", "error"]);
+    if cfg!(target_os = "macos") {
+        cmd.args(["-f", "avfoundation", "-framerate", "30", "-video_size", "640x480", "-i", &device]);
+    } else {
+        cmd.args(["-f", "v4l2", "-video_size", "640x480", "-i", &device]);
+    }
+    cmd.args(["-vf", "scale=8:8,format=gray", "-f", "rawvideo", "-r", "30", "pipe:1"])
+       .stdout(Stdio::piped())
+       .stderr(Stdio::piped());
+    cmd.spawn()
 }
 
 fn run_camera_loop(writer: &LayerWriter, mut reader: impl Read) {
