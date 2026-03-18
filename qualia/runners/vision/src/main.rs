@@ -309,14 +309,27 @@ fn run_vision_loop(shm: &ShmRegion, api_key: &str, interval_secs: u64, max_calls
     }
 }
 
-/// Capture a single JPEG frame from the webcam via ffmpeg.
+/// Read the latest JPEG snapshot written by qualia-camera.
+/// The camera runner writes /tmp/qualia-camera-latest.jpg at ~1fps via ffmpeg.
+/// Falls back to direct ffmpeg capture if the snapshot isn't available.
 fn capture_frame() -> Result<Vec<u8>, String> {
+    let snapshot_path = "/tmp/qualia-camera-latest.jpg";
+
+    // Primary: read snapshot from camera runner (no device conflict)
+    if let Ok(data) = std::fs::read(snapshot_path) {
+        if data.len() > 100 && data[0] == 0xFF && data[1] == 0xD8 {
+            eprintln!("qualia-vision: read snapshot from camera ({}B)", data.len());
+            return Ok(data);
+        }
+    }
+
+    // Fallback: direct capture (will fail if camera runner holds the device)
     let device = std::env::var("CAMERA_DEVICE").unwrap_or_else(|_| {
         if cfg!(target_os = "macos") { "0".into() }
         else { "/dev/video0".into() }
     });
 
-    eprintln!("qualia-vision: calling ffmpeg...");
+    eprintln!("qualia-vision: no snapshot, trying direct ffmpeg capture...");
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-y", "-hide_banner", "-loglevel", "error"]);
     if cfg!(target_os = "macos") {
@@ -332,11 +345,8 @@ fn capture_frame() -> Result<Vec<u8>, String> {
        .stderr(Stdio::piped());
     let output = cmd.output().map_err(|e| format!("ffmpeg: {e}"))?;
 
-    eprintln!("qualia-vision: ffmpeg returned, status={}, stdout={}B", output.status, output.stdout.len());
-
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        eprintln!("qualia-vision: ffmpeg stderr: {}", stderr);
         return Err(format!("ffmpeg failed: {stderr}"));
     }
 

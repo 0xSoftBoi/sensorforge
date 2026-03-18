@@ -72,7 +72,15 @@ fn start_ffmpeg() -> Result<std::process::Child, std::io::Error> {
     } else {
         cmd.args(["-f", "v4l2", "-video_size", "640x480", "-i", &device]);
     }
-    cmd.args(["-vf", "scale=8:8,format=gray", "-f", "rawvideo", "-r", "30", "pipe:1"])
+    // Two outputs from one device:
+    //   1) 8x8 grayscale rawvideo → pipe:1 (SHM at 30fps)
+    //   2) Full-res JPEG snapshot → /tmp/qualia-camera-latest.jpg (vision at 1fps)
+    cmd.args([
+        "-filter_complex", "[0:v]split=2[shm][snap];[shm]scale=8:8,format=gray[low]",
+        "-map", "[low]", "-f", "rawvideo", "-r", "30", "pipe:1",
+        "-map", "[snap]", "-r", "1", "-update", "1", "-q:v", "5",
+        "/tmp/qualia-camera-latest.jpg",
+    ])
        .stdout(Stdio::piped())
        .stderr(Stdio::piped());
     cmd.spawn()
