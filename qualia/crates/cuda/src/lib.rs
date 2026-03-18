@@ -306,6 +306,69 @@ const LAYER_DESCRIPTIONS: [&str; 7] = [
     "senses",
 ];
 
+/// Load layer weights from a checkpoint file. Returns true if loaded.
+fn load_weights(
+    dir: &str,
+    layer_id: u8,
+    weights: &mut [f32; WEIGHT_COUNT],
+    bias: &mut [f32; STATE_DIM],
+) -> bool {
+    let path = format!("{}/layer_{}_weights.bin", dir, layer_id);
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+
+    let expected_len = (WEIGHT_COUNT + STATE_DIM) * std::mem::size_of::<f32>();
+    if data.len() != expected_len {
+        eprintln!(
+            "qualia-l{}: checkpoint {} has wrong size ({} != {}), skipping",
+            layer_id,
+            path,
+            data.len(),
+            expected_len
+        );
+        return false;
+    }
+
+    let floats: &[f32] = unsafe {
+        std::slice::from_raw_parts(data.as_ptr() as *const f32, WEIGHT_COUNT + STATE_DIM)
+    };
+    weights.copy_from_slice(&floats[..WEIGHT_COUNT]);
+    bias.copy_from_slice(&floats[WEIGHT_COUNT..]);
+    eprintln!("qualia-l{}: loaded checkpoint from {}", layer_id, path);
+    true
+}
+
+/// Save layer weights to a checkpoint file (atomic: write .tmp then rename).
+fn save_weights(
+    dir: &str,
+    layer_id: u8,
+    weights: &[f32; WEIGHT_COUNT],
+    bias: &[f32; STATE_DIM],
+) {
+    let path = format!("{}/layer_{}_weights.bin", dir, layer_id);
+    let tmp = format!("{}.tmp", path);
+
+    let mut data = Vec::with_capacity((WEIGHT_COUNT + STATE_DIM) * std::mem::size_of::<f32>());
+    for &w in weights.iter() {
+        data.extend_from_slice(&w.to_le_bytes());
+    }
+    for &b in bias.iter() {
+        data.extend_from_slice(&b.to_le_bytes());
+    }
+
+    if let Err(e) = std::fs::write(&tmp, &data) {
+        eprintln!("qualia-l{}: failed to write checkpoint {}: {}", layer_id, tmp, e);
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        eprintln!("qualia-l{}: failed to rename checkpoint: {}", layer_id, e);
+        return;
+    }
+    eprintln!("qualia-l{}: saved checkpoint to {}", layer_id, path);
+}
+
 /// Run the main loop for a single layer (CUDA backend).
 pub fn run_layer(layer_id: u8, name: &str) {
     use qualia_shm::{LayerReader, LayerWriter, ShmRegion};
@@ -342,7 +405,9 @@ pub fn run_layer(layer_id: u8, name: &str) {
         Duration::from_secs(60)
     };
 
-    // Initialize weights as identity matrix
+    let checkpoint_dir = std::env::var("QUALIA_CHECKPOINT_DIR").ok();
+
+    // Initialize weights — load checkpoint or fall back to identity matrix
     {
         let weights = unsafe {
             let slot_ptr =
@@ -354,11 +419,33 @@ pub fn run_layer(layer_id: u8, name: &str) {
                 my_slot as *const qualia_types::LayerSlot as *mut qualia_types::LayerSlot;
             &mut (*slot_ptr).bias
         };
-        for i in 0..STATE_DIM {
-            for j in 0..STATE_DIM {
-                weights[i * STATE_DIM + j] = if i == j { 1.0 } else { 0.0 };
+
+        let loaded = checkpoint_dir
+            .as_deref()
+            .map(|dir| load_weights(dir, layer_id, weights, bias))
+            .unwrap_or(false);
+
+        if !loaded {
+            for i in 0..STATE_DIM {
+                for j in 0..STATE_DIM {
+                    weights[i * STATE_DIM + j] = if i == j { 1.0 } else { 0.0 };
+                }
+                bias[i] = 0.0;
             }
-            bias[i] = 0.0;
+            eprintln!("qualia-{name}: initialized weights as identity (no checkpoint)");
+        }
+    }
+
+    // Register SIGTERM handler to save weights on shutdown
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let shutdown_flag = shutdown.clone();
+        if let Err(e) = unsafe {
+            signal_hook::low_level::register(signal_hook::consts::SIGTERM, move || {
+                shutdown_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+        } {
+            eprintln!("qualia-{name}: failed to register SIGTERM handler: {e}");
         }
     }
 
@@ -433,6 +520,24 @@ pub fn run_layer(layer_id: u8, name: &str) {
     });
 
     loop {
+        if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+            eprintln!("qualia-{name}: SIGTERM received, saving weights...");
+            if let Some(ref dir) = checkpoint_dir {
+                let weights = unsafe {
+                    let slot_ptr =
+                        my_slot as *const qualia_types::LayerSlot as *mut qualia_types::LayerSlot;
+                    &(*slot_ptr).weights
+                };
+                let bias = unsafe {
+                    let slot_ptr =
+                        my_slot as *const qualia_types::LayerSlot as *mut qualia_types::LayerSlot;
+                    &(*slot_ptr).bias
+                };
+                save_weights(dir, layer_id, weights, bias);
+            }
+            break;
+        }
+
         let cycle_start = Instant::now();
         cycle_count += 1;
 

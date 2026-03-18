@@ -6,18 +6,22 @@ set -euo pipefail
 # Usage:
 #   ./launch_qualia.sh                    # Run stack only
 #   ./launch_qualia.sh --record           # Run + record training data
+#   ./launch_qualia.sh --drive            # Run + autonomous exploration
+#   ./launch_qualia.sh --record --drive   # Full pipeline: stack + record + drive
 #   ./launch_qualia.sh --gemini-key KEY   # Provide Gemini API key
 #   ./launch_qualia.sh --camera /dev/video1  # Override camera device
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 RECORD=false
+DRIVE=false
 CAMERA_DEVICE="${CAMERA_DEVICE:-/dev/video0}"
 
 # Parse args
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --record) RECORD=true; shift ;;
+        --drive) DRIVE=true; shift ;;
         --gemini-key) export GEMINI_API_KEY="$2"; shift 2 ;;
         --camera) CAMERA_DEVICE="$2"; shift 2 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
@@ -33,6 +37,17 @@ if [ -d "$CUDA_DIR" ]; then
     export PATH="$CUDA_HOME/bin:$PATH"
     export LD_LIBRARY_PATH="$CUDA_HOME/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
+
+# ── 1b. CUDA MPS (shares GPU context across layer processes) ────
+if [ -x /usr/bin/nvidia-cuda-mps-control ]; then
+    echo quit | nvidia-cuda-mps-control 2>/dev/null  # kill stale
+    nvidia-cuda-mps-control -d
+    echo "CUDA MPS daemon started"
+fi
+
+# ── 1c. Checkpoint directory for weight persistence ─────────────
+export QUALIA_CHECKPOINT_DIR="${QUALIA_CHECKPOINT_DIR:-$HOME/training-data/checkpoints}"
+mkdir -p "$QUALIA_CHECKPOINT_DIR"
 
 # ── 2. Rust / Cargo ──────────────────────────────────────────────
 source "$HOME/.cargo/env" 2>/dev/null || true
@@ -58,6 +73,7 @@ cleanup() {
         kill "$pid" 2>/dev/null || true
     done
     wait 2>/dev/null
+    echo quit | nvidia-cuda-mps-control 2>/dev/null
     echo "All processes stopped."
 }
 
@@ -90,12 +106,25 @@ if [ "$RECORD" = true ]; then
     PIDS+=($!)
 fi
 
+# ── 8. Launch autonomous explorer (if --drive) ───────────────────
+if [ "$DRIVE" = true ]; then
+    if [ -c /dev/ttyACM0 ]; then
+        echo "Starting autonomous explorer..."
+        python3 "$SCRIPT_DIR/autonomous_explorer.py" &
+        PIDS+=($!)
+    else
+        echo "WARNING: No UGV serial device at /dev/ttyACM0 — skipping drive mode"
+    fi
+fi
+
 echo ""
 echo "=== Qualia Stack Running ==="
-echo "  Camera:     $CAMERA_DEVICE"
-echo "  Dashboard:  http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost):8080"
-echo "  Recording:  $RECORD"
-echo "  Gemini:     ${GEMINI_API_KEY:+enabled}${GEMINI_API_KEY:-offline}"
+echo "  Camera:       $CAMERA_DEVICE"
+echo "  Dashboard:    http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost):8080"
+echo "  Recording:    $RECORD"
+echo "  Driving:      $DRIVE"
+echo "  Checkpoints:  $QUALIA_CHECKPOINT_DIR"
+echo "  Gemini:       ${GEMINI_API_KEY:+enabled}${GEMINI_API_KEY:-offline}"
 echo ""
 echo "Press Ctrl-C to stop all processes."
 

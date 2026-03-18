@@ -9,3 +9,4 @@ description = "cudarc wrapper, .cubin loading, stream management"
 qualia-types.workspace = true
 qualia-shm.workspace = true
 cudarc = { version = "0.12", features = ["std", "driver", "nvrtc", "cuda-12060"] }
+signal-hook = "0.3"

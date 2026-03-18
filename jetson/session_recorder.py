@@ -27,6 +27,19 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from qualia_bridge import QualiaBridge, NUM_LAYERS, STATE_DIM
 
 
+MOTOR_STATE_FILE = "/tmp/qualia_motor_state.json"
+
+
+def read_motor_state():
+    """Read current motor speeds from shared file (written by autonomous_explorer)."""
+    try:
+        with open(MOTOR_STATE_FILE, "r") as f:
+            state = json.load(f)
+        return state.get("motor_left", 0), state.get("motor_right", 0)
+    except (OSError, json.JSONDecodeError, KeyError):
+        return 0, 0
+
+
 def make_csv_header():
     """Build CSV header matching what convert_to_lerobot.py expects."""
     cols = ["timestamp_ns"]
@@ -37,6 +50,7 @@ def make_csv_header():
             f"l{i}_confirm_streak",
             f"l{i}_cycle_us",
         ])
+    cols.extend(["motor_left", "motor_right"])
     cols.extend(["scene", "activity", "num_objects"])
     for i in range(STATE_DIM):
         cols.append(f"embedding_{i}")
@@ -54,6 +68,10 @@ def sample_row(bridge):
         row[f"l{i}_compression"] = belief.compression
         row[f"l{i}_confirm_streak"] = belief.confirm_streak
         row[f"l{i}_cycle_us"] = belief.cycle_us
+
+    motor_left, motor_right = read_motor_state()
+    row["motor_left"] = motor_left
+    row["motor_right"] = motor_right
 
     world = bridge.read_world_model()
     row["scene"] = world.scene.replace(",", ";")  # escape commas for CSV
