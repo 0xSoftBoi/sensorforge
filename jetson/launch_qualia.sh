@@ -7,7 +7,9 @@ set -euo pipefail
 #   ./launch_qualia.sh                    # Run stack only
 #   ./launch_qualia.sh --record           # Run + record training data
 #   ./launch_qualia.sh --drive            # Run + autonomous exploration
+#   ./launch_qualia.sh --manual           # Run + manual keyboard drive
 #   ./launch_qualia.sh --record --drive   # Full pipeline: stack + record + drive
+#   ./launch_qualia.sh --record --manual  # Manual drive + record training data
 #   ./launch_qualia.sh --gemini-key KEY   # Provide Gemini API key
 #   ./launch_qualia.sh --camera /dev/video1  # Override camera device
 
@@ -15,6 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 RECORD=false
 DRIVE=false
+MANUAL=false
 CAMERA_DEVICE="${CAMERA_DEVICE:-/dev/video0}"
 
 # Parse args
@@ -22,11 +25,17 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --record) RECORD=true; shift ;;
         --drive) DRIVE=true; shift ;;
+        --manual) MANUAL=true; shift ;;
         --gemini-key) export GEMINI_API_KEY="$2"; shift 2 ;;
         --camera) CAMERA_DEVICE="$2"; shift 2 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
+
+if [ "$DRIVE" = true ] && [ "$MANUAL" = true ]; then
+    echo "ERROR: --drive and --manual are mutually exclusive"
+    exit 1
+fi
 
 export CAMERA_DEVICE
 
@@ -48,10 +57,14 @@ if [ -x /usr/bin/nvidia-cuda-mps-control ]; then
     nvidia-cuda-mps-control -d 2>/dev/null && echo "CUDA MPS daemon started" || echo "WARNING: CUDA MPS failed to start (non-fatal)"
 fi
 
-# ── 1d. Stop conflicting camera services ────────────────────────
+# ── 1d. Stop conflicting services ─────────────────────────────
 if systemctl is-active --quiet jetson-capture-images 2>/dev/null; then
     echo "Stopping jetson-capture-images (conflicts with qualia-camera)..."
     sudo systemctl stop jetson-capture-images
+fi
+if systemctl is-active --quiet jetson-read-serial 2>/dev/null; then
+    echo "Stopping jetson-read-serial (conflicts with explorer serial port)..."
+    sudo systemctl stop jetson-read-serial
 fi
 
 # Kill orphaned processes from previous runs
@@ -162,13 +175,38 @@ if [ "$DRIVE" = true ]; then
     fi
 fi
 
+# ── 11b. Launch manual drive (if --manual) ───────────────────────
+if [ "$MANUAL" = true ]; then
+    if [ -c /dev/ttyACM0 ]; then
+        echo "Starting manual keyboard drive..."
+        echo "  Use WASD to drive, Space to stop, Q to quit"
+        # Run in foreground so keyboard input works (replaces wait loop below)
+        python3 "$SCRIPT_DIR/manual_drive.py"
+        # When manual_drive exits, clean up everything
+        cleanup
+        exit 0
+    else
+        echo "WARNING: No UGV serial device at /dev/ttyACM0 — skipping manual mode"
+    fi
+fi
+
+# ── 12. Launch watchdog (monitors stack health) ───────────────
+pkill -f "qualia_watchdog" 2>/dev/null || true
+if [ -f "$SCRIPT_DIR/qualia_watchdog.sh" ]; then
+    echo "Starting watchdog (auto-restart on freeze)..."
+    nohup bash "$SCRIPT_DIR/qualia_watchdog.sh" --restart-on-failure >> "$HOME/training-data/watchdog.log" 2>&1 &
+    WATCHDOG_PID=$!
+    PIDS+=($WATCHDOG_PID)
+fi
+
 echo ""
 echo "=== Qualia Stack Running ==="
 echo "  Camera:       $CAMERA_DEVICE"
 echo "  Dashboard:    http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost):8080"
 echo "  Recording:    $RECORD"
-echo "  Driving:      $DRIVE"
+echo "  Driving:      $([ "$DRIVE" = true ] && echo 'autonomous' || ([ "$MANUAL" = true ] && echo 'manual' || echo 'off'))"
 echo "  Checkpoints:  $QUALIA_CHECKPOINT_DIR"
+echo "  Watchdog:     ${WATCHDOG_PID:-disabled}"
 echo "  Gemini:       ${GEMINI_API_KEY:+enabled}${GEMINI_API_KEY:-offline}"
 echo "  Local detect: $(command -v python3 >/dev/null && python3 -c 'import super_gradients' 2>/dev/null && echo 'YOLO' || echo 'unavailable')"
 echo "  Local embed:  $(command -v python3 >/dev/null && python3 -c 'import onnxruntime' 2>/dev/null && echo 'ONNX' || echo 'unavailable')"

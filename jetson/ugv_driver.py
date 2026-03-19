@@ -31,6 +31,7 @@ class UGVDriver:
         self._drain_rx()
 
         self._running = True
+        self._current_cmd = {"L": 0, "R": 0}  # Heartbeat sends this instead of hardcoded stop
         self._heartbeat = threading.Thread(
             target=self._heartbeat_loop, daemon=True,
         )
@@ -44,14 +45,14 @@ class UGVDriver:
             self.serial.readline()
 
     def _heartbeat_loop(self):
-        """Send stop commands every 2s to maintain connection (ESP32 auto-stops after ~3s)."""
+        """Resend current motor command every 2s to keep ESP32 alive (it auto-stops after ~3s)."""
         while self._running:
             time.sleep(HEARTBEAT_INTERVAL)
             if self._running:
                 try:
-                    self._send_raw({"L": 0, "R": 0})
-                except Exception:
-                    pass
+                    self._send_raw(self._current_cmd)
+                except Exception as e:
+                    log.warning(f"Heartbeat send failed: {e}")
 
     def _send_raw(self, cmd):
         """Send a JSON command to the ESP32."""
@@ -59,6 +60,7 @@ class UGVDriver:
             line = json.dumps(cmd) + "\n"
             self.serial.write(line.encode())
             self.serial.flush()
+            log.debug(f"TX: {line.strip()}")
 
     def _read_response(self, timeout=0.5):
         """Read a line from ESP32 (if any)."""
@@ -77,7 +79,9 @@ class UGVDriver:
         """Set motor speeds. Range: -255 to 255 per side."""
         left_speed = max(-MAX_SPEED, min(MAX_SPEED, int(left_speed)))
         right_speed = max(-MAX_SPEED, min(MAX_SPEED, int(right_speed)))
-        self._send_raw({"L": left_speed, "R": right_speed})
+        cmd = {"L": left_speed, "R": right_speed}
+        self._current_cmd = cmd
+        self._send_raw(cmd)
 
     def forward(self, speed=100, duration=1.0):
         """Drive forward for duration seconds."""
@@ -113,7 +117,9 @@ class UGVDriver:
 
     def stop(self):
         """Immediate stop."""
-        self._send_raw({"L": 0, "R": 0})
+        cmd = {"L": 0, "R": 0}
+        self._current_cmd = cmd
+        self._send_raw(cmd)
 
     # ─── Sensor Reads ───────────────────────────────────────────
 
