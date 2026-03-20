@@ -6,7 +6,7 @@ Bypasses the full Qualia stack. Opens serial directly (no heartbeat thread,
 no SHM, no threading races) and sends sustained commands for 3 seconds each.
 
 Usage:
-    python3 motor_test.py [--port /dev/ttyACM0] [--speed 80]
+    python3 motor_test.py [--port /dev/ttyTHS1] [--speed 80]
 """
 
 import json
@@ -16,7 +16,7 @@ import time
 
 def send(ser, left, right):
     """Send a motor command and log it."""
-    cmd = {"L": left, "R": right}
+    cmd = {"T": 11, "L": left, "R": right}
     line = json.dumps(cmd) + "\n"
     ser.write(line.encode())
     ser.flush()
@@ -74,7 +74,7 @@ def run_test(ser, name, left, right, speed, duration=3.0):
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Standalone motor diagnostic")
-    parser.add_argument("--port", default="/dev/ttyACM0", help="Serial port")
+    parser.add_argument("--port", default="/dev/ttyTHS1", help="Serial port")
     parser.add_argument("--baud", type=int, default=115200, help="Baud rate")
     parser.add_argument("--speed", type=int, default=80, help="Test speed (0-128)")
     args = parser.parse_args()
@@ -99,7 +99,7 @@ def main():
     except Exception as e:
         print(f"ERROR: Cannot open {args.port}: {e}")
         print("  - Is the USB cable connected?")
-        print("  - Is another process using the port? (check: fuser /dev/ttyACM0)")
+        print("  - Is another process using the port? (check: fuser /dev/ttyTHS1)")
         print("  - Is ESP32 in bootloader mode? (try unplugging and replugging)")
         sys.exit(1)
 

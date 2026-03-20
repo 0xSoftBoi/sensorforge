@@ -12,7 +12,7 @@ Phase 3.2: Records actions to SHM ActionHistory so layers can learn
 sensorimotor contingencies.
 
 Usage:
-    python3 autonomous_explorer.py [--port /dev/ttyACM0] [--speed 60]
+    python3 autonomous_explorer.py [--port /dev/ttyTHS1] [--speed 60]
 """
 
 import json
@@ -270,7 +270,7 @@ class EFEPolicy:
 
 
 class AutonomousExplorer:
-    def __init__(self, port="/dev/ttyACM0", speed=BASE_SPEED):
+    def __init__(self, port="/dev/ttyTHS1", speed=BASE_SPEED):
         self.bridge = QualiaBridge()
         self.ugv = None
         self.port = port
@@ -457,7 +457,7 @@ class AutonomousExplorer:
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="EFE-driven autonomous exploration")
-    parser.add_argument("--port", default="/dev/ttyACM0", help="UGV serial port")
+    parser.add_argument("--port", default="/dev/ttyTHS1", help="UGV serial port")
     parser.add_argument("--speed", type=int, default=BASE_SPEED, help="Base motor speed (0-128)")
     args = parser.parse_args()
 

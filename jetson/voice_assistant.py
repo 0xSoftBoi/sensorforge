@@ -100,7 +100,7 @@ SYSTEM_PROMPT = (
 )
 
 # UGV serial port
-UGV_PORT = "/dev/ttyACM0"
+UGV_PORT = "/dev/ttyTHS1"
 UGV_BAUD = 115200
 MAX_AUTONOMOUS_DURATION = 60  # Max seconds for autonomous exploration
 
@@ -2348,7 +2348,7 @@ def main():
     parser.add_argument("--test-reasoning", action="store_true",
                         help="Test reasoning mode (qwen3:0.6b)")
     parser.add_argument("--test-serial", action="store_true",
-                        help="Probe /dev/ttyACM0, print device info, test stop command")
+                        help="Probe /dev/ttyTHS1, print device info, test stop command")
     parser.add_argument("--test-drive", action="store_true",
                         help="Move forward 1s, backward 1s, left, right, stop")
     parser.add_argument("--test-explore", action="store_true",

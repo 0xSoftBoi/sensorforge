@@ -1,11 +1,15 @@
 """
 Waveshare UGV Serial Driver — JSON commands to ESP32 lower controller.
 
-Protocol: Send JSON lines like {"L":128,"R":128} over serial at 115200 baud.
+Protocol: Send JSON lines with a "T" type field over serial at 115200 baud.
+  T:11  — direct PWM control: {"T":11,"L":128,"R":128}  (int, -255 to +255)
+  T:1   — closed-loop speed:  {"T":1,"L":0.3,"R":0.3}   (float, -0.5 to +0.5 m/s)
+
 The ESP32 has a ~3s heartbeat timeout — if no command arrives, motors stop.
 This driver maintains a keepalive thread to prevent unexpected stops.
 
-Speed range: -255 (full reverse) to 255 (full forward) per motor.
+Speed range (T:11 PWM mode): -255 (full reverse) to 255 (full forward) per motor.
+Serial port: /dev/ttyTHS1 (Tegra hardware UART to ESP32).
 """
 
 import json
@@ -24,14 +28,14 @@ HEARTBEAT_INTERVAL = 2.0 # Seconds between keepalive commands
 class UGVDriver:
     """Waveshare UGV serial driver — JSON motor commands to ESP32."""
 
-    def __init__(self, port="/dev/ttyACM0", baud=115200):
+    def __init__(self, port="/dev/ttyTHS1", baud=115200):
         import serial
         self.serial = serial.Serial(port, baud, timeout=1)
         time.sleep(0.5)  # ESP32 reset delay
         self._drain_rx()
 
         self._running = True
-        self._current_cmd = {"L": 0, "R": 0}  # Heartbeat sends this instead of hardcoded stop
+        self._current_cmd = {"T": 11, "L": 0, "R": 0}  # Heartbeat sends this instead of hardcoded stop
         self._heartbeat = threading.Thread(
             target=self._heartbeat_loop, daemon=True,
         )
@@ -79,7 +83,7 @@ class UGVDriver:
         """Set motor speeds. Range: -255 to 255 per side."""
         left_speed = max(-MAX_SPEED, min(MAX_SPEED, int(left_speed)))
         right_speed = max(-MAX_SPEED, min(MAX_SPEED, int(right_speed)))
-        cmd = {"L": left_speed, "R": right_speed}
+        cmd = {"T": 11, "L": left_speed, "R": right_speed}
         self._current_cmd = cmd
         self._send_raw(cmd)
 
@@ -117,7 +121,7 @@ class UGVDriver:
 
     def stop(self):
         """Immediate stop."""
-        cmd = {"L": 0, "R": 0}
+        cmd = {"T": 11, "L": 0, "R": 0}
         self._current_cmd = cmd
         self._send_raw(cmd)
 
@@ -164,8 +168,19 @@ class UGVDriver:
     def __exit__(self, *args):
         self.close()
 
+    def read_telemetry(self, timeout=0.5):
+        """Read T:1001 telemetry response from ESP32.
+
+        Returns dict with keys like: T, L, R, ax, ay, az, gx, gy, gz, v (battery mV),
+        odl, odr (odometry ticks), or None if no data.
+        """
+        resp = self._read_response(timeout=timeout)
+        if resp and isinstance(resp, dict) and resp.get("T") == 1001:
+            return resp
+        return resp
+
     @staticmethod
-    def probe(port="/dev/ttyACM0", baud=115200):
+    def probe(port="/dev/ttyTHS1", baud=115200):
         """Test serial connection. Returns (success, info_string)."""
         try:
             import serial
@@ -181,7 +196,7 @@ class UGVDriver:
                 if line:
                     startup.append(line)
             # Send stop command (safe)
-            s.write(json.dumps({"L": 0, "R": 0}).encode() + b"\n")
+            s.write(json.dumps({"T": 11, "L": 0, "R": 0}).encode() + b"\n")
             time.sleep(0.5)
             # Read response
             responses = []

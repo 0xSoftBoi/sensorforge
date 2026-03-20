@@ -15,7 +15,7 @@ Controls:
     Q / Esc     Quit
 
 Usage:
-    python3 manual_drive.py [--port /dev/ttyACM0] [--speed 60]
+    python3 manual_drive.py [--port /dev/ttyTHS1] [--speed 60]
 
     # SSH with terminal allocation for keyboard input:
     ssh -t jetson 'cd ~/sensorforge && python3 jetson/manual_drive.py'
@@ -155,7 +155,7 @@ def format_direction(left, right):
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Manual keyboard drive with live VFE display")
-    parser.add_argument("--port", default="/dev/ttyACM0", help="UGV serial port")
+    parser.add_argument("--port", default="/dev/ttyTHS1", help="UGV serial port")
     parser.add_argument("--speed", type=int, default=60, help="Initial speed (30-128)")
     args = parser.parse_args()
 

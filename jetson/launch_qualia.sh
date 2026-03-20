@@ -166,18 +166,18 @@ fi
 
 # ── 11. Launch autonomous explorer (if --drive) ──────────────────
 if [ "$DRIVE" = true ]; then
-    if [ -c /dev/ttyACM0 ]; then
+    if [ -c /dev/ttyTHS1 ]; then
         echo "Starting EFE autonomous explorer..."
         python3 "$SCRIPT_DIR/autonomous_explorer.py" &
         PIDS+=($!)
     else
-        echo "WARNING: No UGV serial device at /dev/ttyACM0 — skipping drive mode"
+        echo "WARNING: No UGV serial device at /dev/ttyTHS1 — skipping drive mode"
     fi
 fi
 
 # ── 11b. Launch manual drive (if --manual) ───────────────────────
 if [ "$MANUAL" = true ]; then
-    if [ -c /dev/ttyACM0 ]; then
+    if [ -c /dev/ttyTHS1 ]; then
         echo "Starting manual keyboard drive..."
         echo "  Use WASD to drive, Space to stop, Q to quit"
         # Run in foreground so keyboard input works (replaces wait loop below)
@@ -186,7 +186,7 @@ if [ "$MANUAL" = true ]; then
         cleanup
         exit 0
     else
-        echo "WARNING: No UGV serial device at /dev/ttyACM0 — skipping manual mode"
+        echo "WARNING: No UGV serial device at /dev/ttyTHS1 — skipping manual mode"
     fi
 fi
 
