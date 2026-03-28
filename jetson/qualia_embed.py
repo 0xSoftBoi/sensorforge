@@ -6,8 +6,11 @@ Phase 2.3: Replace cloud Gemini embeddings with local all-MiniLM-L6-v2
 (~80MB ONNX, runs on CPU). Generates 384-dim embeddings from detection
 descriptions, pools to 64-dim for the Qualia state space.
 
-Updates every few seconds (not every 5 minutes like Gemini).
-No GPU needed — runs entirely on ARM CPU cores.
+Phase 6.6: Upgraded embedding pipeline:
+  - Confidence-weighted object descriptions (high-conf objects emphasized)
+  - Raw spatial coordinates in text (x=0.35, y=0.52) for richer encoding
+  - Temporal context buffer: embed current + recent 2 frames for change awareness
+  - Audio-visual fusion: incorporate audio VAD/features when available
 
 Usage:
     python3 qualia_embed.py [--interval 2.0] [--model all-MiniLM-L6-v2]
@@ -217,31 +220,76 @@ def pool_to_64(embedding: np.ndarray) -> np.ndarray:
     return result
 
 
-def build_scene_text(detections: list) -> str:
-    """Build a text description from detection results for embedding."""
+AUDIO_FEATURES_FILE = "/tmp/qualia_audio_features.json"
+
+
+def build_scene_text(detections: list, audio_context: str = "") -> str:
+    """Build a rich text description from detections for embedding.
+
+    Phase 6.6 improvements:
+    - Include raw (x, y) coordinates for precise spatial encoding
+    - Sort by confidence (most confident first — embedding models weight early tokens)
+    - Include spatial relationships between objects
+    - Incorporate audio context (VAD, ambient description)
+    """
     if not detections:
-        return "empty scene, no objects detected"
+        base = "empty scene, no objects detected"
+        return f"{base}. {audio_context}" if audio_context else base
+
+    # Sort by confidence descending — embedding models give more weight to early tokens
+    sorted_dets = sorted(detections, key=lambda d: d.get("confidence", 0), reverse=True)
 
     obj_strs = []
-    for d in detections:
-        pos = ""
+    for d in sorted_dets:
         x, y = d.get("x", 0.5), d.get("y", 0.5)
-        if x < 0.33:
-            pos = "left"
-        elif x > 0.66:
-            pos = "right"
-        else:
-            pos = "center"
-
-        if y < 0.33:
-            pos += " top"
-        elif y > 0.66:
-            pos += " bottom"
-
         conf = d.get("confidence", 0)
-        obj_strs.append(f"{d['name']} at {pos} ({conf:.0%} confidence)")
 
-    return f"Scene with {len(detections)} objects: {', '.join(obj_strs)}"
+        # Spatial description with both words AND raw coordinates
+        h_pos = "left" if x < 0.33 else ("right" if x > 0.66 else "center")
+        v_pos = "upper" if y < 0.33 else ("lower" if y > 0.66 else "middle")
+
+        obj_strs.append(
+            f"{d['name']} at {h_pos}-{v_pos} (x={x:.2f}, y={y:.2f}, {conf:.0%})"
+        )
+
+    # Add spatial relationships for top objects
+    relationships = []
+    if len(sorted_dets) >= 2:
+        for i in range(min(len(sorted_dets) - 1, 3)):
+            a, b = sorted_dets[i], sorted_dets[i + 1]
+            dx = a.get("x", 0.5) - b.get("x", 0.5)
+            if abs(dx) > 0.2:
+                rel = "left of" if dx < 0 else "right of"
+                relationships.append(f"{a['name']} is {rel} {b['name']}")
+
+    parts = [f"Scene with {len(detections)} objects: {', '.join(obj_strs)}"]
+    if relationships:
+        parts.append(f"Layout: {'; '.join(relationships)}")
+    if audio_context:
+        parts.append(audio_context)
+
+    return ". ".join(parts)
+
+
+def get_audio_context() -> str:
+    """Read audio features file and build audio context string for embedding."""
+    try:
+        if not os.path.exists(AUDIO_FEATURES_FILE):
+            return ""
+        with open(AUDIO_FEATURES_FILE) as f:
+            data = json.load(f)
+        if time.time() - data.get("ts", 0) > 5.0:
+            return ""
+        vad = data.get("vad", False)
+        rms = data.get("rms", 0)
+        if vad:
+            return f"Audio: speech detected (loudness {rms:.3f})"
+        elif rms > 0.01:
+            return f"Audio: ambient sound (loudness {rms:.3f})"
+        else:
+            return "Audio: silence"
+    except (json.JSONDecodeError, OSError):
+        return ""
 
 
 def write_embedding_to_shm(bridge, embedding: np.ndarray):
@@ -311,9 +359,14 @@ def main():
         except ImportError:
             log.warning("qualia_bridge not found")
 
-    log.info(f"Running every {args.interval:.1f}s")
+    log.info(f"Running every {args.interval:.1f}s (Phase 6.6: temporal buffer + audio fusion)")
     update_count = 0
     prev_text = ""
+
+    # Phase 6.6: Temporal embedding buffer — blend current with recent frames
+    TEMPORAL_BUFFER_SIZE = 3
+    temporal_embeddings: list = []  # list of recent 64-dim embeddings
+    TEMPORAL_WEIGHTS = np.array([0.1, 0.25, 0.65])  # oldest → newest weighting
 
     try:
         while running:
@@ -342,8 +395,11 @@ def main():
                 except Exception:
                     pass
 
-            # Build embedding text from detections + scene
-            det_text = build_scene_text(detections)
+            # Phase 6.6: Get audio context for multi-modal fusion
+            audio_ctx = get_audio_context()
+
+            # Build embedding text from detections + scene + audio
+            det_text = build_scene_text(detections, audio_context=audio_ctx)
             full_text = f"{det_text}. {scene_text}" if scene_text else det_text
 
             # Skip if text hasn't changed
@@ -358,15 +414,35 @@ def main():
             # Generate embedding
             try:
                 t0 = time.monotonic()
-                embedding_64 = embedder.embed_to_64(full_text)
+                current_emb = embedder.embed_to_64(full_text)
                 dt_ms = (time.monotonic() - t0) * 1000
+
+                # Phase 6.6: Temporal blending — weighted average of recent embeddings
+                # This gives the embedding a sense of "what's been happening" not just "what is now"
+                temporal_embeddings.append(current_emb.copy())
+                if len(temporal_embeddings) > TEMPORAL_BUFFER_SIZE:
+                    temporal_embeddings.pop(0)
+
+                if len(temporal_embeddings) >= TEMPORAL_BUFFER_SIZE:
+                    w = TEMPORAL_WEIGHTS
+                    embedding_64 = sum(
+                        w[i] * temporal_embeddings[i]
+                        for i in range(TEMPORAL_BUFFER_SIZE)
+                    )
+                    # Re-normalize after blending
+                    norm = np.linalg.norm(embedding_64)
+                    if norm > 0:
+                        embedding_64 = embedding_64 / norm
+                else:
+                    embedding_64 = current_emb
 
                 update_count += 1
                 if update_count % 10 == 1 or detections:
                     norm = float(np.linalg.norm(embedding_64))
                     log.info(
                         f"#{update_count} {dt_ms:.0f}ms: {len(detections)} obj, "
-                        f"norm={norm:.3f}, text={full_text[:60]}"
+                        f"norm={norm:.3f}, buf={len(temporal_embeddings)}/{TEMPORAL_BUFFER_SIZE}, "
+                        f"text={full_text[:60]}"
                     )
 
                 # Write to SHM

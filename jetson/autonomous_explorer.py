@@ -5,11 +5,12 @@ Autonomous Explorer — Expected Free Energy (EFE) driven exploration.
 Phase 3.1: Replaces random left/right with EFE minimization:
   EFE(action) = -epistemic_value - pragmatic_value + novelty_cost
 
-Maintains a circular buffer of (action, pre_vfe, post_vfe, embedding) tuples.
-For each candidate action, predicts outcome from history and picks lowest EFE.
-
 Phase 3.2: Records actions to SHM ActionHistory so layers can learn
 sensorimotor contingencies.
+
+Phase 6.4: Boltzmann softmax action selection with adaptive temperature,
+TD(λ)-style outcome prediction, and information-theoretic curiosity bonus
+(Pathak et al. 2017 ICM-inspired).
 
 Usage:
     python3 autonomous_explorer.py [--port /dev/ttyTHS1] [--speed 60]
@@ -74,8 +75,19 @@ EMBEDDING_DIM = 16            # compressed embedding for action history
 EPISTEMIC_WEIGHT = 1.0        # weight for information gain
 PRAGMATIC_WEIGHT = 0.5        # weight for goal alignment
 NOVELTY_WEIGHT = 0.3          # weight for novelty seeking
+CURIOSITY_WEIGHT = 0.4        # weight for prediction-error curiosity (Phase 6.4)
 HISTORY_SIZE = 200            # action-outcome buffer size
 MIN_HISTORY = 10              # minimum samples before using EFE
+
+# Boltzmann softmax parameters (Phase 6.4)
+SOFTMAX_TEMP_INIT = 1.0       # initial temperature (higher = more random)
+SOFTMAX_TEMP_MIN = 0.1        # minimum temperature (near-greedy)
+SOFTMAX_TEMP_DECAY = 0.995    # decay per action (anneal toward exploitation)
+
+# TD learning parameters (Phase 6.4)
+TD_LAMBDA = 0.7               # eligibility trace decay
+TD_GAMMA = 0.95               # discount factor for future VFE reduction
+TD_LR = 0.05                  # learning rate for value estimates
 
 # Action codes
 ACTION_STOP = 0
@@ -165,31 +177,76 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 
 class EFEPolicy:
-    """Expected Free Energy policy for action selection.
+    """Expected Free Energy policy with Boltzmann softmax selection,
+    TD(λ)-style value prediction, and curiosity bonus.
 
-    EFE(action) = -epistemic_value(action) - pragmatic_value(action) + novelty_cost(action)
-
-    Lower EFE = better action.
-    - Epistemic: how much VFE change do we expect? (information gain)
-    - Pragmatic: how close to the directive goal will we get?
-    - Novelty: prefer states dissimilar to recent history
+    Phase 6.4 upgrades:
+    - Boltzmann softmax: stochastic selection proportional to exp(-EFE/τ)
+      with adaptive temperature τ that decays from exploration to exploitation
+    - TD(λ) prediction: exponentially-weighted temporal difference learning
+      for more accurate VFE outcome predictions (replaces simple averaging)
+    - Curiosity bonus: reward for prediction errors (Pathak et al. 2017 ICM)
+      — prefer actions whose outcomes are hard to predict (high epistemic value)
     """
 
     def __init__(self, history_size: int = HISTORY_SIZE):
         self.history: deque = deque(maxlen=history_size)
         self.candidate_actions = [ACTION_FORWARD, ACTION_LEFT, ACTION_RIGHT]
+        self.temperature = SOFTMAX_TEMP_INIT
+
+        # TD(λ) value estimates: V(action) = expected cumulative VFE reduction
+        self.action_values = {a: 0.0 for a in self.candidate_actions}
+        # Eligibility traces for TD(λ)
+        self.eligibility = {a: 0.0 for a in self.candidate_actions}
+        self.last_action = None
+        self.last_vfe = None
+
+        # Prediction error tracking for curiosity bonus
+        self.prediction_errors = {a: deque(maxlen=50) for a in self.candidate_actions}
 
     def record(self, outcome: ActionOutcome):
-        """Record an action-outcome pair."""
+        """Record an action-outcome pair and update TD value estimates."""
         self.history.append(outcome)
+
+        vfe_delta = float(outcome.post_vfe.mean() - outcome.pre_vfe.mean())
+
+        # TD(λ) update: reward = -vfe_delta (VFE decrease is good)
+        reward = -vfe_delta
+        if self.last_action is not None and self.last_vfe is not None:
+            # TD error: δ = r + γ·V(a') - V(a)
+            td_error = (reward + TD_GAMMA * self.action_values.get(outcome.action, 0.0)
+                        - self.action_values.get(self.last_action, 0.0))
+
+            # Update all action values proportional to eligibility
+            for a in self.candidate_actions:
+                self.action_values[a] += TD_LR * td_error * self.eligibility[a]
+                # Decay eligibility traces
+                self.eligibility[a] *= TD_GAMMA * TD_LAMBDA
+
+        # Set eligibility for current action
+        self.eligibility[outcome.action] = 1.0
+        self.last_action = outcome.action
+        self.last_vfe = float(outcome.post_vfe.mean())
+
+        # Track prediction error for curiosity (Phase 6.4)
+        predicted_delta, predicted_emb, conf = self.predict_outcome(outcome.action)
+        actual_delta = vfe_delta
+        pred_error = abs(actual_delta - predicted_delta)
+        if predicted_emb is not None:
+            emb_error = float(np.linalg.norm(outcome.post_embedding - predicted_emb))
+            pred_error += emb_error
+        self.prediction_errors[outcome.action].append(pred_error)
+
+        # Decay temperature (anneal from exploration to exploitation)
+        self.temperature = max(SOFTMAX_TEMP_MIN, self.temperature * SOFTMAX_TEMP_DECAY)
 
     def predict_outcome(self, action: int) -> tuple:
         """Predict (vfe_change, embedding_change) for an action from history.
+        Uses recency-weighted averaging with TD-bootstrapped value correction.
         Returns (mean_vfe_delta, predicted_post_embedding, confidence)."""
         matching = [h for h in self.history if h.action == action]
 
         if len(matching) < 3:
-            # Not enough data — return neutral prediction with low confidence
             return 0.0, None, 0.0
 
         # Weighted by recency (more recent = more weight)
@@ -201,13 +258,26 @@ class EFEPolicy:
         ])
         mean_delta = float(np.average(vfe_deltas, weights=weights))
 
-        # Predicted post-embedding: weighted average of historical post-embeddings
+        # Blend in TD value estimate for multi-step lookahead
+        td_value = self.action_values.get(action, 0.0)
+        confidence = min(len(matching) / 20.0, 1.0)
+        # TD correction: shift predicted delta toward learned value
+        mean_delta = mean_delta * 0.7 + (-td_value) * 0.3 * confidence
+
         post_embeddings = np.array([h.post_embedding for h in matching])
         predicted_emb = np.average(post_embeddings, axis=0, weights=weights)
 
-        confidence = min(len(matching) / 20.0, 1.0)  # saturates at 20 samples
-
         return mean_delta, predicted_emb, confidence
+
+    def _curiosity_bonus(self, action: int) -> float:
+        """Information-theoretic curiosity: reward for high prediction error.
+        Actions whose outcomes we can't predict well have high epistemic value."""
+        errors = self.prediction_errors.get(action)
+        if not errors or len(errors) < 3:
+            return 1.0  # maximum curiosity for unexplored actions
+        mean_error = float(np.mean(list(errors)))
+        # Normalize: high error = high curiosity, but cap to prevent runaway
+        return min(mean_error, 5.0) / 5.0
 
     def compute_efe(self, action: int, current_vfes: np.ndarray,
                     current_embedding: np.ndarray,
@@ -219,8 +289,7 @@ class EFEPolicy:
         vfe_delta, predicted_emb, confidence = self.predict_outcome(action)
 
         # 1. Epistemic value: expected VFE reduction (information gain)
-        # Negative delta = VFE decreased = good = positive epistemic value
-        epistemic = -vfe_delta * confidence  # flip sign: decrease is good
+        epistemic = -vfe_delta * confidence
 
         # 2. Pragmatic value: predicted alignment with directive
         pragmatic = 0.0
@@ -235,12 +304,15 @@ class EFEPolicy:
                 for past_emb in recent_embeddings[-20:]
             ]
             mean_sim = np.mean(similarities) if similarities else 0.0
-            novelty = 1.0 - mean_sim  # high novelty when low similarity
+            novelty = 1.0 - mean_sim
 
-        # EFE = -epistemic - pragmatic - novelty (we minimize, so negate the goods)
+        # 4. Curiosity bonus (Phase 6.4): reward unpredictable outcomes
+        curiosity = self._curiosity_bonus(action)
+
         efe = -(EPISTEMIC_WEIGHT * epistemic
                 + PRAGMATIC_WEIGHT * pragmatic
-                + NOVELTY_WEIGHT * novelty)
+                + NOVELTY_WEIGHT * novelty
+                + CURIOSITY_WEIGHT * curiosity)
 
         return efe
 
@@ -248,10 +320,10 @@ class EFEPolicy:
                       current_embedding: np.ndarray,
                       directive_embedding: np.ndarray,
                       recent_embeddings: list) -> tuple:
-        """Select the action with lowest EFE. Returns (action, efe_scores)."""
+        """Select action via Boltzmann softmax over EFE scores.
+        Returns (action, efe_scores)."""
 
         if len(self.history) < MIN_HISTORY:
-            # Not enough data — explore randomly
             action = random.choice(self.candidate_actions)
             return action, {}
 
@@ -263,8 +335,19 @@ class EFEPolicy:
             )
             efe_scores[action] = efe
 
-        # Select action with lowest EFE (with small random tiebreaker)
-        best_action = min(efe_scores, key=lambda a: efe_scores[a] + random.gauss(0, 0.01))
+        # Boltzmann softmax: P(a) ∝ exp(-EFE(a) / τ)
+        # Lower EFE = higher probability, temperature controls exploration
+        actions = list(efe_scores.keys())
+        efes = np.array([efe_scores[a] for a in actions])
+
+        # Numerical stability: subtract max before exp
+        efes_shifted = -(efes - efes.min()) / max(self.temperature, 1e-6)
+        exp_efes = np.exp(efes_shifted)
+        probs = exp_efes / exp_efes.sum()
+
+        # Sample action from distribution
+        chosen_idx = np.random.choice(len(actions), p=probs)
+        best_action = actions[chosen_idx]
 
         return best_action, efe_scores
 
@@ -338,10 +421,13 @@ class AutonomousExplorer:
         self.calibrate_baseline()
 
         directive_emb = get_directive_embedding(self.bridge)
-        log.info("Starting EFE-driven exploration")
+        log.info("Starting EFE-driven exploration (Phase 6.4: Boltzmann + TD + Curiosity)")
         log.info(f"  Speed: {self.speed}, Safety: {VFE_SAFETY_THRESHOLD}x, "
                  f"History: {HISTORY_SIZE}, EFE weights: "
-                 f"ep={EPISTEMIC_WEIGHT} pr={PRAGMATIC_WEIGHT} nv={NOVELTY_WEIGHT}")
+                 f"ep={EPISTEMIC_WEIGHT} pr={PRAGMATIC_WEIGHT} "
+                 f"nv={NOVELTY_WEIGHT} cu={CURIOSITY_WEIGHT}")
+        log.info(f"  Softmax τ₀={SOFTMAX_TEMP_INIT} τ_min={SOFTMAX_TEMP_MIN} "
+                 f"decay={SOFTMAX_TEMP_DECAY}, TD λ={TD_LAMBDA} γ={TD_GAMMA}")
 
         action_count = 0
 
@@ -430,8 +516,14 @@ class AutonomousExplorer:
                 scores_str = " ".join(
                     f"{ACTION_NAMES.get(a, '?')}={s:.3f}" for a, s in efe_scores.items()
                 )
+                td_str = " ".join(
+                    f"{ACTION_NAMES.get(a, '?')}={v:.3f}"
+                    for a, v in self.policy.action_values.items()
+                )
                 log.info(f"#{action_count} {ACTION_NAMES.get(action, '?')}: "
-                         f"dVFE={vfe_delta:+.4f}, z_max={max_z:.1f}, EFE=[{scores_str}]")
+                         f"dVFE={vfe_delta:+.4f}, z_max={max_z:.1f}, "
+                         f"τ={self.policy.temperature:.3f}, "
+                         f"EFE=[{scores_str}], TD=[{td_str}]")
             else:
                 log.info(f"#{action_count} {ACTION_NAMES.get(action, '?')} (random): "
                          f"dVFE={vfe_delta:+.4f}, z_max={max_z:.1f}, "

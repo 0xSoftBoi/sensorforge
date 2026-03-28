@@ -189,6 +189,16 @@ pub struct LayerSlot {
     pub weights: [f32; WEIGHT_COUNT],
     /// Generative model bias vector.
     pub bias: [f32; STATE_DIM],
+    /// Adam optimizer first moment (momentum) for weights.
+    pub adam_m_w: [f32; WEIGHT_COUNT],
+    /// Adam optimizer second moment (RMSProp) for weights.
+    pub adam_v_w: [f32; WEIGHT_COUNT],
+    /// Adam first moment for bias.
+    pub adam_m_b: [f32; STATE_DIM],
+    /// Adam second moment for bias.
+    pub adam_v_b: [f32; STATE_DIM],
+    /// Adam timestep counter (per-layer, incremented each weight update).
+    pub adam_t: AtomicU64,
     pub write_idx: AtomicUsize,
     pub challenge_flag: AtomicBool,
     pub confirm_flag: AtomicBool,

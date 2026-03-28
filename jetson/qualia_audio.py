@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-Qualia Audio Features — Mel-spectrogram sensor input.
+Qualia Audio Features — Mel-spectrogram + MFCC sensor input.
 
-Phase 4.1: Feed 64-band mel-spectrogram features from USB mic into
-the Qualia sensor layer. Features are multiplexed with visual data
-(32 dims visual + 32 dims audio) or can use a dedicated sensor slot.
+Phase 4.1: Feed mel-spectrogram features from USB mic into Qualia sensor layer.
+Phase 6.5: Upgraded with SOTA audio features:
+  - MFCCs via DCT (Davis & Mermelstein 1980) for decorrelated spectral features
+  - Delta and delta-delta coefficients for temporal dynamics
+  - Voice Activity Detection (VAD) to skip silent frames
+  - Spectral contrast and zero-crossing rate for richer features
+  - Overlapping windows (50%) for transient capture
 
-Runs at 10Hz, generating mel-spectrogram features from 100ms audio windows.
-Writes features into a shared file for qualia-camera to multiplex,
-or directly into L6 sensor slot (configurable).
+Runs at 10Hz, generating features from 100ms audio windows with 50% overlap.
 
 Usage:
-    python3 qualia_audio.py [--device default] [--bands 32]
+    python3 qualia_audio.py [--device default] [--bands 64]
 """
 
 import argparse
@@ -19,9 +21,9 @@ import json
 import logging
 import os
 import signal
-import struct
 import sys
 import time
+from collections import deque
 
 import numpy as np
 
@@ -59,9 +61,16 @@ def acquire_singleton(name):
 
 
 SAMPLE_RATE = 16000
-WINDOW_MS = 100  # 100ms windows at 10Hz
+WINDOW_MS = 100  # 100ms windows
+HOP_MS = 50      # 50% overlap (Phase 6.5)
 N_FFT = 512
 N_MELS = 64
+N_MFCC = 20     # number of MFCCs to compute
+
+# VAD parameters (Phase 6.5)
+VAD_ENERGY_THRESHOLD = 0.005   # RMS below this = silence
+VAD_ZCR_THRESHOLD = 0.3       # zero-crossing rate above this = likely unvoiced/noise
+VAD_HOLD_FRAMES = 5           # keep "active" for N frames after last speech
 
 
 def compute_mel_filterbank(sr: int, n_fft: int, n_mels: int) -> np.ndarray:
@@ -93,42 +102,169 @@ def compute_mel_filterbank(sr: int, n_fft: int, n_mels: int) -> np.ndarray:
     return fbank
 
 
-def audio_to_mel_features(audio: np.ndarray, mel_bank: np.ndarray, n_bands: int) -> np.ndarray:
-    """Convert audio samples to mel-spectrogram features."""
-    # Apply Hanning window
-    windowed = audio * np.hanning(len(audio))
+def compute_dct_matrix(n_mfcc: int, n_mels: int) -> np.ndarray:
+    """Compute DCT-II matrix for MFCC extraction (Type II, ortho normalized).
+    This is the standard DCT used in speech processing."""
+    dct = np.zeros((n_mfcc, n_mels))
+    for k in range(n_mfcc):
+        for n in range(n_mels):
+            dct[k, n] = np.cos(np.pi * k * (2 * n + 1) / (2 * n_mels))
+    # Orthonormal normalization
+    dct[0, :] *= np.sqrt(1.0 / n_mels)
+    dct[1:, :] *= np.sqrt(2.0 / n_mels)
+    return dct
 
-    # FFT
-    spectrum = np.abs(np.fft.rfft(windowed, n=N_FFT)) ** 2
 
-    # Apply mel filterbank
-    mel_spec = mel_bank @ spectrum
+def zero_crossing_rate(audio: np.ndarray) -> float:
+    """Compute zero-crossing rate of audio signal."""
+    if len(audio) < 2:
+        return 0.0
+    signs = np.sign(audio)
+    crossings = np.sum(np.abs(np.diff(signs)) > 0)
+    return float(crossings) / (len(audio) - 1)
 
-    # Log scale (with floor to avoid log(0))
-    mel_log = np.log10(np.maximum(mel_spec, 1e-10))
 
-    # Normalize to [0, 1] range
-    mel_min, mel_max = mel_log.min(), mel_log.max()
-    if mel_max > mel_min:
-        mel_norm = (mel_log - mel_min) / (mel_max - mel_min)
-    else:
-        mel_norm = np.zeros_like(mel_log)
+def spectral_contrast(spectrum: np.ndarray, n_bands: int = 6) -> np.ndarray:
+    """Compute spectral contrast: difference between peaks and valleys in each
+    sub-band. Useful for distinguishing harmonic (speech/music) from noise."""
+    band_size = len(spectrum) // n_bands
+    contrast = np.zeros(n_bands)
+    for i in range(n_bands):
+        band = spectrum[i * band_size:(i + 1) * band_size]
+        if len(band) == 0:
+            continue
+        sorted_band = np.sort(band)
+        n_top = max(1, len(band) // 4)
+        peak = sorted_band[-n_top:].mean()
+        valley = sorted_band[:n_top].mean()
+        contrast[i] = np.log10(max(peak, 1e-10)) - np.log10(max(valley, 1e-10))
+    return contrast
 
-    # Pool to requested number of bands
-    if len(mel_norm) > n_bands:
-        bin_size = len(mel_norm) / n_bands
-        pooled = np.array([
-            mel_norm[int(i * bin_size):int((i + 1) * bin_size)].mean()
-            for i in range(n_bands)
-        ])
-        return pooled
-    return mel_norm[:n_bands]
+
+class AudioFeatureExtractor:
+    """Full audio feature pipeline: mel + MFCC + delta + VAD + spectral contrast."""
+
+    def __init__(self, n_bands: int = 64):
+        self.n_bands = n_bands
+        self.mel_bank = compute_mel_filterbank(SAMPLE_RATE, N_FFT, N_MELS)
+        self.dct_matrix = compute_dct_matrix(N_MFCC, N_MELS)
+
+        # History buffer for delta computation (Phase 6.5)
+        self.mfcc_history: deque = deque(maxlen=5)
+
+        # VAD state
+        self.vad_active = False
+        self.vad_hold_counter = 0
+
+        # Running normalization stats (EMA-based, no per-frame normalization)
+        self.mel_ema_mean = None
+        self.mel_ema_var = None
+        self.norm_alpha = 0.02
+
+    def extract(self, audio: np.ndarray) -> dict:
+        """Extract all features from a single audio window.
+        Returns dict with mel, mfcc, delta, delta2, vad, zcr, contrast, rms."""
+
+        rms = float(np.sqrt(np.mean(audio ** 2)))
+
+        # Apply Hanning window
+        windowed = audio * np.hanning(len(audio))
+
+        # Power spectrum
+        spectrum = np.abs(np.fft.rfft(windowed, n=N_FFT)) ** 2
+
+        # Mel-spectrogram (log scale)
+        mel_spec = self.mel_bank @ spectrum
+        mel_log = np.log10(np.maximum(mel_spec, 1e-10))
+
+        # Running normalization (Phase 6.5: global stats instead of per-frame)
+        if self.mel_ema_mean is None:
+            self.mel_ema_mean = mel_log.copy()
+            self.mel_ema_var = np.ones_like(mel_log)
+        else:
+            self.mel_ema_mean += self.norm_alpha * (mel_log - self.mel_ema_mean)
+            dev = mel_log - self.mel_ema_mean
+            self.mel_ema_var += self.norm_alpha * (dev * dev - self.mel_ema_var)
+
+        mel_norm = (mel_log - self.mel_ema_mean) / np.sqrt(np.maximum(self.mel_ema_var, 1e-6))
+        mel_norm = np.clip(mel_norm, -3.0, 3.0) / 3.0  # normalize to [-1, 1]
+
+        # MFCCs via DCT (Phase 6.5)
+        mfcc = self.dct_matrix @ mel_log
+
+        # Store for delta computation
+        self.mfcc_history.append(mfcc.copy())
+
+        # Delta features: first-order temporal derivative
+        delta = np.zeros_like(mfcc)
+        delta2 = np.zeros_like(mfcc)
+        if len(self.mfcc_history) >= 3:
+            # Simple regression-based delta (Furui 1986)
+            h = list(self.mfcc_history)
+            delta = (h[-1] - h[-3]) / 2.0
+        if len(self.mfcc_history) >= 5:
+            h = list(self.mfcc_history)
+            delta2 = (h[-1] - 2 * h[-3] + h[-5]) / 4.0
+
+        # Zero-crossing rate
+        zcr = zero_crossing_rate(audio)
+
+        # Spectral contrast
+        contrast = spectral_contrast(spectrum, n_bands=6)
+
+        # Voice Activity Detection (Phase 6.5)
+        is_speech = rms > VAD_ENERGY_THRESHOLD and zcr < VAD_ZCR_THRESHOLD
+        if is_speech:
+            self.vad_active = True
+            self.vad_hold_counter = VAD_HOLD_FRAMES
+        elif self.vad_hold_counter > 0:
+            self.vad_hold_counter -= 1
+        else:
+            self.vad_active = False
+
+        # Pool mel to requested bands
+        if len(mel_norm) > self.n_bands:
+            bin_size = len(mel_norm) / self.n_bands
+            mel_pooled = np.array([
+                mel_norm[int(i * bin_size):int((i + 1) * bin_size)].mean()
+                for i in range(self.n_bands)
+            ])
+        else:
+            mel_pooled = mel_norm[:self.n_bands]
+
+        return {
+            "mel": mel_pooled,
+            "mfcc": mfcc,
+            "delta": delta,
+            "delta2": delta2,
+            "zcr": zcr,
+            "contrast": contrast,
+            "rms": rms,
+            "vad": self.vad_active,
+        }
+
+    def to_feature_vector(self, features: dict) -> np.ndarray:
+        """Flatten all features into a single vector for Qualia ingestion.
+        Layout: [mel(n_bands) | mfcc(20) | delta(20) | delta2(20) | contrast(6) | zcr(1) | rms(1) | vad(1)]
+        Total with 64 mel bands: 64 + 20 + 20 + 20 + 6 + 1 + 1 + 1 = 133 dims
+        We pool/truncate to n_bands for the output file (backward compat) but write full vector too."""
+        parts = [
+            features["mel"],
+            features["mfcc"],
+            features["delta"],
+            features["delta2"],
+            features["contrast"],
+            np.array([features["zcr"]]),
+            np.array([features["rms"]]),
+            np.array([1.0 if features["vad"] else 0.0]),
+        ]
+        return np.concatenate(parts)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Audio features for Qualia")
     parser.add_argument("--device", default="default", help="ALSA device name")
-    parser.add_argument("--bands", type=int, default=32, help="Number of mel bands (32 or 64)")
+    parser.add_argument("--bands", type=int, default=64, help="Number of mel bands (32 or 64)")
     parser.add_argument("--hz", type=float, default=10.0, help="Update frequency")
     args = parser.parse_args()
 
@@ -143,12 +279,13 @@ def main():
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
-    # Precompute mel filterbank
-    mel_bank = compute_mel_filterbank(SAMPLE_RATE, N_FFT, N_MELS)
+    extractor = AudioFeatureExtractor(n_bands=args.bands)
     interval = 1.0 / max(args.hz, 0.1)
-    samples_per_window = int(SAMPLE_RATE * WINDOW_MS / 1000)
+    hop_samples = int(SAMPLE_RATE * HOP_MS / 1000)
+    window_samples = int(SAMPLE_RATE * WINDOW_MS / 1000)
 
-    log.info(f"Audio features: {args.bands} bands at {args.hz:.0f}Hz, window={WINDOW_MS}ms")
+    log.info(f"Audio features: {args.bands} mel + {N_MFCC} MFCC + deltas at {args.hz:.0f}Hz, "
+             f"window={WINDOW_MS}ms, hop={HOP_MS}ms (50% overlap)")
 
     # Try to open audio device
     audio_stream = None
@@ -158,16 +295,18 @@ def main():
             samplerate=SAMPLE_RATE,
             channels=1,
             dtype="float32",
-            blocksize=samples_per_window,
+            blocksize=hop_samples,
             device=None if args.device == "default" else args.device,
         )
         audio_stream.start()
         log.info("Audio stream started (sounddevice)")
     except (ImportError, Exception) as e:
         log.warning(f"Cannot open audio device: {e}")
-        log.warning("Running in synthetic mode (generates test patterns)")
+        log.warning("Running in synthetic mode (pink noise + speech-like modulation)")
         audio_stream = None
 
+    # Overlap buffer: keep previous hop for 50% overlap
+    prev_hop = np.zeros(hop_samples, dtype=np.float32)
     update_count = 0
 
     try:
@@ -176,28 +315,45 @@ def main():
 
             if audio_stream is not None:
                 try:
-                    audio_data, overflowed = audio_stream.read(samples_per_window)
+                    audio_data, overflowed = audio_stream.read(hop_samples)
                     if overflowed:
                         log.warning("Audio buffer overflow")
-                    audio = audio_data[:, 0]  # mono
+                    current_hop = audio_data[:, 0]
                 except Exception as e:
                     log.error(f"Audio read error: {e}")
-                    audio = np.zeros(samples_per_window, dtype=np.float32)
+                    current_hop = np.zeros(hop_samples, dtype=np.float32)
             else:
-                # Synthetic audio: sine wave with varying frequency
-                t = np.linspace(0, WINDOW_MS / 1000, samples_per_window)
-                freq = 200 + 100 * np.sin(update_count * 0.1)
-                audio = np.sin(2 * np.pi * freq * t).astype(np.float32) * 0.5
+                # Synthetic: pink noise with speech-like amplitude modulation
+                t = np.linspace(0, HOP_MS / 1000, hop_samples)
+                # Pink noise approximation: 1/f spectrum
+                white = np.random.randn(hop_samples).astype(np.float32)
+                # Simple 1/f filter via cumulative sum + high-pass
+                pink = np.cumsum(white) * 0.002
+                pink -= np.mean(pink)
+                # Speech-like AM: slow modulation (3-8 Hz syllable rate)
+                am = 0.3 + 0.7 * np.abs(np.sin(2 * np.pi * 5.0 * t + update_count * 0.3))
+                current_hop = (pink * am).astype(np.float32)
 
-            # Compute mel features
-            features = audio_to_mel_features(audio, mel_bank, args.bands)
+            # Assemble overlapping window
+            audio = np.concatenate([prev_hop, current_hop])[:window_samples]
+            prev_hop = current_hop.copy()
 
-            # Write to shared file for camera runner to multiplex
+            # Extract features
+            features = extractor.extract(audio)
+
+            # Write to shared file
             data = {
                 "ts": time.time(),
                 "bands": args.bands,
-                "features": features.tolist(),
-                "rms": float(np.sqrt(np.mean(audio ** 2))),
+                "features": features["mel"].tolist(),
+                "mfcc": features["mfcc"].tolist(),
+                "delta": features["delta"].tolist(),
+                "delta2": features["delta2"].tolist(),
+                "contrast": features["contrast"].tolist(),
+                "zcr": features["zcr"],
+                "rms": features["rms"],
+                "vad": features["vad"],
+                "full_vector": extractor.to_feature_vector(features).tolist(),
             }
             tmp = AUDIO_FEATURES_FILE + ".tmp"
             try:
@@ -209,8 +365,10 @@ def main():
 
             update_count += 1
             if update_count % 100 == 0:
-                rms = float(np.sqrt(np.mean(audio ** 2)))
-                log.info(f"#{update_count}: rms={rms:.4f}, bands={args.bands}")
+                vad_str = "SPEECH" if features["vad"] else "silent"
+                log.info(f"#{update_count}: rms={features['rms']:.4f}, "
+                         f"zcr={features['zcr']:.3f}, {vad_str}, "
+                         f"bands={args.bands}+{N_MFCC}mfcc")
 
             elapsed = time.monotonic() - loop_start
             if elapsed < interval:

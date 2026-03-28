@@ -5,6 +5,12 @@ Qualia Object Detection — local YOLO inference on Jetson Orin Nano.
 Phase 2.2: Replace cloud-based Gemini for object detection with on-device
 YOLO-NAS-S (INT8 via TensorRT). Runs at 1-5Hz, ~30-70ms per frame.
 
+Phase 6.7: Upgraded with SOTA detection improvements:
+  - IoU-based object tracking across frames (persistent object IDs)
+  - Per-class confidence thresholds (people: 0.3, vehicles: 0.35, etc.)
+  - Detection health monitoring with automatic degradation reporting
+  - Confidence-ranked output (highest confidence objects first)
+
 Hardware budget: ~200MB GPU memory (INT8 model). Must not run concurrently
 with Ollama — uses file-based model lock for time-sharing.
 
@@ -21,9 +27,11 @@ import signal
 import struct
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -72,6 +80,201 @@ class Detection:
     y: float  # center y, normalized [0, 1]
     w: float  # width, normalized
     h: float  # height, normalized
+    track_id: int = -1  # Phase 6.7: persistent tracking ID (-1 = untracked)
+    age: int = 0         # frames since first seen
+
+
+# Phase 6.7: Per-class confidence thresholds
+# Lower thresholds for important/safety-critical classes
+CLASS_CONF_THRESHOLDS = {
+    "person": 0.30,
+    "bicycle": 0.35,
+    "car": 0.35,
+    "motorcycle": 0.35,
+    "bus": 0.35,
+    "truck": 0.35,
+    "cat": 0.35,
+    "dog": 0.35,
+    "chair": 0.45,
+    "couch": 0.45,
+    "tv": 0.45,
+    "laptop": 0.40,
+    "cell phone": 0.40,
+    "book": 0.45,
+    "cup": 0.40,
+    "bottle": 0.40,
+}
+DEFAULT_CONF_THRESHOLD = 0.40
+
+
+def iou(det_a: Detection, det_b: Detection) -> float:
+    """Compute Intersection-over-Union between two detections (center + wh format)."""
+    ax1 = det_a.x - det_a.w / 2
+    ay1 = det_a.y - det_a.h / 2
+    ax2 = det_a.x + det_a.w / 2
+    ay2 = det_a.y + det_a.h / 2
+
+    bx1 = det_b.x - det_b.w / 2
+    by1 = det_b.y - det_b.h / 2
+    bx2 = det_b.x + det_b.w / 2
+    by2 = det_b.y + det_b.h / 2
+
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+
+    inter_area = max(0, inter_x2 - inter_x1) * max(0, inter_y2 - inter_y1)
+    area_a = det_a.w * det_a.h
+    area_b = det_b.w * det_b.h
+    union_area = area_a + area_b - inter_area
+
+    return inter_area / max(union_area, 1e-8)
+
+
+class ObjectTracker:
+    """Simple IoU-based multi-object tracker (Phase 6.7).
+
+    Assigns persistent track IDs to detections across frames using
+    greedy IoU matching (Hungarian algorithm is overkill for ≤16 objects).
+    Tracks are maintained for MAX_LOST_FRAMES after disappearing.
+    """
+
+    IOU_THRESHOLD = 0.25     # minimum IoU to match
+    MAX_LOST_FRAMES = 5      # frames before dropping a track
+
+    def __init__(self):
+        self.next_id = 0
+        self.tracks: list = []  # list of (Detection, lost_count)
+
+    def update(self, detections: list) -> list:
+        """Match new detections to existing tracks, return updated detections with track IDs."""
+        if not self.tracks:
+            # First frame: assign new IDs to all detections
+            for det in detections:
+                det.track_id = self.next_id
+                det.age = 1
+                self.next_id += 1
+            self.tracks = [(det, 0) for det in detections]
+            return detections
+
+        # Greedy IoU matching: for each new detection, find best matching track
+        matched_tracks = set()
+        matched_dets = set()
+        results = []
+
+        # Compute IoU matrix and sort by IoU descending (greedy matching)
+        matches = []
+        for di, det in enumerate(detections):
+            for ti, (track, _) in enumerate(self.tracks):
+                if det.name == track.name:  # only match same class
+                    score = iou(det, track)
+                    if score >= self.IOU_THRESHOLD:
+                        matches.append((score, di, ti))
+
+        matches.sort(reverse=True)  # highest IoU first
+
+        for score, di, ti in matches:
+            if di in matched_dets or ti in matched_tracks:
+                continue
+            # Match found: inherit track ID and increment age
+            det = detections[di]
+            old_track, _ = self.tracks[ti]
+            det.track_id = old_track.track_id
+            det.age = old_track.age + 1
+            matched_tracks.add(ti)
+            matched_dets.add(di)
+            results.append(det)
+
+        # Unmatched detections: assign new track IDs
+        for di, det in enumerate(detections):
+            if di not in matched_dets:
+                det.track_id = self.next_id
+                det.age = 1
+                self.next_id += 1
+                results.append(det)
+
+        # Update tracks: matched tracks get updated, unmatched increment lost count
+        new_tracks = []
+        for det in results:
+            new_tracks.append((det, 0))
+
+        # Keep lost tracks for a few frames (may reappear)
+        for ti, (track, lost) in enumerate(self.tracks):
+            if ti not in matched_tracks:
+                if lost < self.MAX_LOST_FRAMES:
+                    new_tracks.append((track, lost + 1))
+
+        self.tracks = new_tracks
+        return results
+
+
+class DetectionHealthMonitor:
+    """Monitors detection pipeline health (Phase 6.7).
+
+    Tracks: consecutive failures, latency percentiles, detection rate.
+    Writes health status to a file so other components can check."""
+
+    HEALTH_FILE = "/tmp/qualia_detect_health.json"
+
+    def __init__(self):
+        self.total_frames = 0
+        self.total_detections = 0
+        self.consecutive_failures = 0
+        self.latencies: list = []  # recent latencies in ms
+        self.max_latency_buffer = 100
+
+    def record_success(self, n_detections: int, latency_ms: float):
+        self.total_frames += 1
+        self.total_detections += n_detections
+        self.consecutive_failures = 0
+        self.latencies.append(latency_ms)
+        if len(self.latencies) > self.max_latency_buffer:
+            self.latencies.pop(0)
+        self._write_health()
+
+    def record_failure(self):
+        self.total_frames += 1
+        self.consecutive_failures += 1
+        self._write_health()
+
+    @property
+    def is_healthy(self) -> bool:
+        return self.consecutive_failures < 5
+
+    def _write_health(self):
+        import numpy as np
+        latencies = self.latencies or [0]
+        data = {
+            "ts": time.time(),
+            "healthy": self.is_healthy,
+            "total_frames": self.total_frames,
+            "total_detections": self.total_detections,
+            "consecutive_failures": self.consecutive_failures,
+            "avg_detections_per_frame": (
+                self.total_detections / max(self.total_frames, 1)
+            ),
+            "latency_p50_ms": float(np.median(latencies)),
+            "latency_p95_ms": float(np.percentile(latencies, 95)) if len(latencies) > 1 else latencies[0],
+            "latency_p99_ms": float(np.percentile(latencies, 99)) if len(latencies) > 1 else latencies[0],
+        }
+        tmp = self.HEALTH_FILE + ".tmp"
+        try:
+            with open(tmp, "w") as f:
+                json.dump(data, f)
+            os.replace(tmp, self.HEALTH_FILE)
+        except OSError:
+            pass
+
+
+def apply_class_thresholds(detections: list, default_conf: float) -> list:
+    """Filter detections using per-class confidence thresholds (Phase 6.7)."""
+    filtered = []
+    for det in detections:
+        threshold = CLASS_CONF_THRESHOLDS.get(det.name, default_conf)
+        if det.confidence >= threshold:
+            filtered.append(det)
+    return filtered
 
 
 class ModelLock:
@@ -289,13 +492,23 @@ def write_detections_to_shm(bridge, detections: list):
 
 
 def write_detections_json(detections: list):
-    """Write detections to JSON file for other consumers."""
+    """Write detections to JSON file for other consumers.
+    Phase 6.7: includes track_id and age for temporal consistency."""
+    # Sort by confidence descending (most confident first)
+    sorted_dets = sorted(detections, key=lambda d: d.confidence, reverse=True)
     data = {
         "ts": time.time(),
-        "count": len(detections),
+        "count": len(sorted_dets),
         "objects": [
-            {"name": d.name, "confidence": d.confidence, "x": d.x, "y": d.y}
-            for d in detections
+            {
+                "name": d.name,
+                "confidence": d.confidence,
+                "x": d.x,
+                "y": d.y,
+                "track_id": d.track_id,
+                "age": d.age,
+            }
+            for d in sorted_dets
         ],
     }
     tmp = DETECTION_OUTPUT + ".tmp"
@@ -354,7 +567,13 @@ def main():
         lock.release()
         sys.exit(1)
 
+    # Phase 6.7: Initialize tracker and health monitor
+    tracker = ObjectTracker()
+    health = DetectionHealthMonitor()
+
     log.info(f"Running at {hz:.1f} Hz, conf={args.conf}, interval={interval:.2f}s")
+    log.info(f"  Phase 6.7: IoU tracking (threshold={ObjectTracker.IOU_THRESHOLD}), "
+             f"per-class thresholds, health monitoring")
     detect_count = 0
 
     try:
@@ -367,8 +586,8 @@ def main():
 
             # Check snapshot freshness (skip if older than 5s)
             try:
-                age = time.time() - os.path.getmtime(SNAPSHOT_PATH)
-                if age > 5.0:
+                snap_age = time.time() - os.path.getmtime(SNAPSHOT_PATH)
+                if snap_age > 5.0:
                     time.sleep(0.5)
                     continue
             except OSError:
@@ -376,15 +595,32 @@ def main():
 
             try:
                 t0 = time.monotonic()
-                detections = detector.detect(SNAPSHOT_PATH, conf=args.conf)
+                # Run detector with low base threshold (per-class filtering happens after)
+                raw_detections = detector.detect(SNAPSHOT_PATH, conf=min(args.conf, 0.25))
                 dt_ms = (time.monotonic() - t0) * 1000
 
+                # Phase 6.7: Apply per-class confidence thresholds
+                detections = apply_class_thresholds(raw_detections, args.conf)
+
+                # Phase 6.7: Update tracker with persistent object IDs
+                detections = tracker.update(detections)
+
+                # Truncate to MAX_OBJECTS (keep highest confidence)
+                detections.sort(key=lambda d: d.confidence, reverse=True)
+                detections = detections[:MAX_OBJECTS]
+
                 detect_count += 1
+                health.record_success(len(detections), dt_ms)
+
                 if detections:
-                    names = [f"{d.name}({d.confidence:.0%})" for d in detections[:5]]
+                    names = [
+                        f"{d.name}#{d.track_id}({d.confidence:.0%},age={d.age})"
+                        for d in detections[:5]
+                    ]
                     log.info(f"#{detect_count} {dt_ms:.0f}ms: {', '.join(names)}")
                 elif detect_count % 10 == 0:
-                    log.info(f"#{detect_count} {dt_ms:.0f}ms: no objects")
+                    log.info(f"#{detect_count} {dt_ms:.0f}ms: no objects "
+                             f"(tracks: {len(tracker.tracks)})")
 
                 # Write results
                 if bridge:
@@ -393,6 +629,9 @@ def main():
 
             except Exception as e:
                 log.error(f"Detection error: {e}")
+                health.record_failure()
+                if not health.is_healthy:
+                    log.error(f"HEALTH WARNING: {health.consecutive_failures} consecutive failures")
                 time.sleep(1.0)
 
             elapsed = time.monotonic() - loop_start
@@ -403,7 +642,8 @@ def main():
         lock.release()
         if bridge:
             bridge.close()
-        log.info(f"Detector shutdown after {detect_count} frames")
+        log.info(f"Detector shutdown after {detect_count} frames "
+                 f"(tracked {tracker.next_id} unique objects)")
 
 
 if __name__ == "__main__":
