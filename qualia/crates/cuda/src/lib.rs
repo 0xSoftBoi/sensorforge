@@ -123,6 +123,17 @@ pub struct LayerParams {
     pub surprise_threshold: f32,
     /// Weight for top-down prediction errors (Phase 5.1)
     pub top_down_weight: f32,
+    // Phase 8: Adam optimizer hyperparameters
+    pub adam_beta1: f32,
+    pub adam_beta2: f32,
+    pub adam_epsilon: f32,
+    // Phase 8: Langevin exploration noise
+    pub langevin_sigma: f32,
+    // Phase 8: Gradient clipping
+    pub grad_clip_norm: f32,
+    // Phase 8: LR scheduling
+    pub warmup_steps: f32,
+    pub total_steps: f32,
 }
 
 pub struct CudaContext {
@@ -139,15 +150,22 @@ impl CudaContext {
             .load_ptx(ptx, "belief", &["belief_update"])
             .map_err(|e| format!("PTX load failed: {e}"))?;
 
-        let params_data: [f32; 8] = [
-            params.threshold,
-            params.learning_rate,
-            params.layer_id as f32,
-            params.weight_decay,
-            if has_above { 1.0 } else { 0.0 },
-            params.precision_eta,
-            params.surprise_threshold,
-            params.top_down_weight,
+        let params_data: [f32; 15] = [
+            params.threshold,        // [0]
+            params.learning_rate,    // [1]
+            params.layer_id as f32,  // [2]
+            params.weight_decay,     // [3]
+            if has_above { 1.0 } else { 0.0 }, // [4] has_above
+            params.precision_eta,    // [5]
+            params.surprise_threshold, // [6]
+            params.top_down_weight,  // [7]
+            params.adam_beta1,       // [8]
+            params.adam_beta2,       // [9]
+            params.adam_epsilon,     // [10]
+            params.langevin_sigma,   // [11]
+            params.grad_clip_norm,   // [12]
+            params.warmup_steps,     // [13]
+            params.total_steps,      // [14]
         ];
         let params_dev = device
             .htod_copy(params_data.to_vec())
@@ -161,8 +179,7 @@ impl CudaContext {
     }
 
     /// Run belief update kernel on GPU with full generative model.
-    /// `above` is the belief from the layer above (for top-down prediction errors).
-    /// Pass None for the topmost layer.
+    /// Phase 8: passes all 17 buffers including GLU gates and Adam optimizer state.
     pub fn dispatch_belief_update(
         &self,
         belief: &mut BeliefSlot,
@@ -170,6 +187,17 @@ impl CudaContext {
         above: Option<&BeliefSlot>,
         weights: &mut [f32; WEIGHT_COUNT],
         bias: &mut [f32; STATE_DIM],
+        gate_w: &mut [f32; WEIGHT_COUNT],
+        gate_b: &mut [f32; STATE_DIM],
+        adam_m_w: &mut [f32; WEIGHT_COUNT],
+        adam_v_w: &mut [f32; WEIGHT_COUNT],
+        adam_m_b: &mut [f32; STATE_DIM],
+        adam_v_b: &mut [f32; STATE_DIM],
+        adam_m_gw: &mut [f32; WEIGHT_COUNT],
+        adam_v_gw: &mut [f32; WEIGHT_COUNT],
+        adam_m_gb: &mut [f32; STATE_DIM],
+        adam_v_gb: &mut [f32; STATE_DIM],
+        adam_t: &mut u32,
     ) {
         let belief_bytes = unsafe {
             std::slice::from_raw_parts(
@@ -184,7 +212,6 @@ impl CudaContext {
             )
         };
 
-        // For the above layer: use real data or a zeroed placeholder
         let dummy_above: BeliefSlot = unsafe { std::mem::zeroed() };
         let above_ref = above.unwrap_or(&dummy_above);
         let above_bytes = unsafe {
@@ -194,46 +221,62 @@ impl CudaContext {
             )
         };
 
-        let belief_dev = self
-            .device
-            .htod_copy(belief_bytes.to_vec())
-            .expect("belief htod");
-        let below_dev = self
-            .device
-            .htod_copy(below_bytes.to_vec())
-            .expect("below htod");
-        let above_dev = self
-            .device
-            .htod_copy(above_bytes.to_vec())
-            .expect("above htod");
-        let weights_dev = self
-            .device
-            .htod_copy(weights.to_vec())
-            .expect("weights htod");
+        let belief_dev = self.device.htod_copy(belief_bytes.to_vec()).expect("belief htod");
+        let below_dev = self.device.htod_copy(below_bytes.to_vec()).expect("below htod");
+        let above_dev = self.device.htod_copy(above_bytes.to_vec()).expect("above htod");
+        let weights_dev = self.device.htod_copy(weights.to_vec()).expect("weights htod");
         let bias_dev = self.device.htod_copy(bias.to_vec()).expect("bias htod");
+        // Phase 8: GLU gate buffers
+        let gate_w_dev = self.device.htod_copy(gate_w.to_vec()).expect("gate_w htod");
+        let gate_b_dev = self.device.htod_copy(gate_b.to_vec()).expect("gate_b htod");
+        // Phase 8: Adam optimizer moment buffers
+        let adam_m_w_dev = self.device.htod_copy(adam_m_w.to_vec()).expect("adam_m_w htod");
+        let adam_v_w_dev = self.device.htod_copy(adam_v_w.to_vec()).expect("adam_v_w htod");
+        let adam_m_b_dev = self.device.htod_copy(adam_m_b.to_vec()).expect("adam_m_b htod");
+        let adam_v_b_dev = self.device.htod_copy(adam_v_b.to_vec()).expect("adam_v_b htod");
+        let adam_m_gw_dev = self.device.htod_copy(adam_m_gw.to_vec()).expect("adam_m_gw htod");
+        let adam_v_gw_dev = self.device.htod_copy(adam_v_gw.to_vec()).expect("adam_v_gw htod");
+        let adam_m_gb_dev = self.device.htod_copy(adam_m_gb.to_vec()).expect("adam_m_gb htod");
+        let adam_v_gb_dev = self.device.htod_copy(adam_v_gb.to_vec()).expect("adam_v_gb htod");
+        let adam_t_dev = self.device.htod_copy(vec![*adam_t]).expect("adam_t htod");
 
-        let kernel = self
-            .device
-            .get_func("belief", "belief_update")
-            .expect("kernel not found");
+        let kernel = self.device.get_func("belief", "belief_update").expect("kernel not found");
 
-        // 1 block of 64 threads — matches Metal dispatch (64 threads per layer)
         let cfg = LaunchConfig {
             grid_dim: (1, 1, 1),
             block_dim: (STATE_DIM as u32, 1, 1),
-            shared_mem_bytes: 0, // shared memory is statically allocated in kernel
+            shared_mem_bytes: 0,
         };
 
+        // Phase 8: 17 buffers exceeds cudarc's LaunchAsync tuple limit,
+        // so we build the raw kernel parameter pointer array manually.
         unsafe {
+            use cudarc::driver::DevicePtr;
+            let mut params_ptrs: Vec<*mut std::ffi::c_void> = vec![
+                *belief_dev.device_ptr() as *mut std::ffi::c_void,
+                *below_dev.device_ptr() as *mut std::ffi::c_void,
+                *above_dev.device_ptr() as *mut std::ffi::c_void,
+                *self.params_dev.device_ptr() as *mut std::ffi::c_void,
+                *weights_dev.device_ptr() as *mut std::ffi::c_void,
+                *bias_dev.device_ptr() as *mut std::ffi::c_void,
+                *gate_w_dev.device_ptr() as *mut std::ffi::c_void,
+                *gate_b_dev.device_ptr() as *mut std::ffi::c_void,
+                *adam_m_w_dev.device_ptr() as *mut std::ffi::c_void,
+                *adam_v_w_dev.device_ptr() as *mut std::ffi::c_void,
+                *adam_m_b_dev.device_ptr() as *mut std::ffi::c_void,
+                *adam_v_b_dev.device_ptr() as *mut std::ffi::c_void,
+                *adam_m_gw_dev.device_ptr() as *mut std::ffi::c_void,
+                *adam_v_gw_dev.device_ptr() as *mut std::ffi::c_void,
+                *adam_m_gb_dev.device_ptr() as *mut std::ffi::c_void,
+                *adam_v_gb_dev.device_ptr() as *mut std::ffi::c_void,
+                *adam_t_dev.device_ptr() as *mut std::ffi::c_void,
+            ];
             kernel
-                .launch(
-                    cfg,
-                    (&belief_dev, &below_dev, &above_dev, &self.params_dev, &weights_dev, &bias_dev),
-                )
+                .launch(cfg, &mut params_ptrs)
                 .expect("kernel launch failed");
         }
 
-        // Copy results back
+        // Copy back all mutable buffers
         let belief_result = self.device.dtoh_sync_copy(&belief_dev).expect("belief dtoh");
         unsafe {
             std::ptr::copy_nonoverlapping(
@@ -243,100 +286,50 @@ impl CudaContext {
             );
         }
 
-        let weights_result = self
-            .device
-            .dtoh_sync_copy(&weights_dev)
-            .expect("weights dtoh");
-        weights.copy_from_slice(&weights_result);
-
-        let bias_result = self.device.dtoh_sync_copy(&bias_dev).expect("bias dtoh");
-        bias.copy_from_slice(&bias_result);
+        weights.copy_from_slice(&self.device.dtoh_sync_copy(&weights_dev).expect("weights dtoh"));
+        bias.copy_from_slice(&self.device.dtoh_sync_copy(&bias_dev).expect("bias dtoh"));
+        gate_w.copy_from_slice(&self.device.dtoh_sync_copy(&gate_w_dev).expect("gate_w dtoh"));
+        gate_b.copy_from_slice(&self.device.dtoh_sync_copy(&gate_b_dev).expect("gate_b dtoh"));
+        adam_m_w.copy_from_slice(&self.device.dtoh_sync_copy(&adam_m_w_dev).expect("adam_m_w dtoh"));
+        adam_v_w.copy_from_slice(&self.device.dtoh_sync_copy(&adam_v_w_dev).expect("adam_v_w dtoh"));
+        adam_m_b.copy_from_slice(&self.device.dtoh_sync_copy(&adam_m_b_dev).expect("adam_m_b dtoh"));
+        adam_v_b.copy_from_slice(&self.device.dtoh_sync_copy(&adam_v_b_dev).expect("adam_v_b dtoh"));
+        adam_m_gw.copy_from_slice(&self.device.dtoh_sync_copy(&adam_m_gw_dev).expect("adam_m_gw dtoh"));
+        adam_v_gw.copy_from_slice(&self.device.dtoh_sync_copy(&adam_v_gw_dev).expect("adam_v_gw dtoh"));
+        adam_m_gb.copy_from_slice(&self.device.dtoh_sync_copy(&adam_m_gb_dev).expect("adam_m_gb dtoh"));
+        adam_v_gb.copy_from_slice(&self.device.dtoh_sync_copy(&adam_v_gb_dev).expect("adam_v_gb dtoh"));
+        *adam_t = self.device.dtoh_sync_copy(&adam_t_dev).expect("adam_t dtoh")[0];
     }
 }
 
+/// Phase 8: Common Adam/Langevin/LR defaults shared across layers.
+const ADAM_BETA1: f32 = 0.9;
+const ADAM_BETA2: f32 = 0.999;
+const ADAM_EPSILON: f32 = 1e-8;
+const LANGEVIN_SIGMA: f32 = 0.01;
+const GRAD_CLIP_NORM: f32 = 1.0;
+const WARMUP_STEPS: f32 = 100.0;
+const TOTAL_STEPS: f32 = 10000.0;
+
 pub fn default_params(layer_id: u8) -> LayerParams {
+    let base = |threshold, learning_rate, lid, freq_hz, weight_decay, precision_eta, surprise_threshold, top_down_weight| {
+        LayerParams {
+            threshold, learning_rate, layer_id: lid, freq_hz, weight_decay, precision_eta,
+            surprise_threshold, top_down_weight,
+            adam_beta1: ADAM_BETA1, adam_beta2: ADAM_BETA2, adam_epsilon: ADAM_EPSILON,
+            langevin_sigma: LANGEVIN_SIGMA, grad_clip_norm: GRAD_CLIP_NORM,
+            warmup_steps: WARMUP_STEPS, total_steps: TOTAL_STEPS,
+        }
+    };
     match layer_id {
-        0 => LayerParams {
-            threshold: 0.1,
-            learning_rate: 0.01,
-            layer_id: 0,
-            freq_hz: 1000.0,
-            weight_decay: 0.0001,
-            precision_eta: 0.01,
-            surprise_threshold: 2.0,
-            top_down_weight: 0.3,
-        },
-        1 => LayerParams {
-            threshold: 0.08,
-            learning_rate: 0.008,
-            layer_id: 1,
-            freq_hz: 100.0,
-            weight_decay: 0.0001,
-            precision_eta: 0.01,
-            surprise_threshold: 2.0,
-            top_down_weight: 0.3,
-        },
-        2 => LayerParams {
-            threshold: 0.05,
-            learning_rate: 0.005,
-            layer_id: 2,
-            freq_hz: 100.0,
-            weight_decay: 0.00005,
-            precision_eta: 0.008,
-            surprise_threshold: 2.0,
-            top_down_weight: 0.3,
-        },
-        3 => LayerParams {
-            threshold: 0.05,
-            learning_rate: 0.005,
-            layer_id: 3,
-            freq_hz: 100.0,
-            weight_decay: 0.00005,
-            precision_eta: 0.008,
-            surprise_threshold: 2.0,
-            top_down_weight: 0.3,
-        },
-        4 => LayerParams {
-            threshold: 0.03,
-            learning_rate: 0.003,
-            layer_id: 4,
-            freq_hz: 1.0,
-            weight_decay: 0.00001,
-            precision_eta: 0.005,
-            surprise_threshold: 2.5,
-            top_down_weight: 0.4,
-        },
-        5 => LayerParams {
-            threshold: 0.02,
-            learning_rate: 0.002,
-            layer_id: 5,
-            freq_hz: 0.1,
-            weight_decay: 0.00001,
-            precision_eta: 0.003,
-            surprise_threshold: 3.0,
-            top_down_weight: 0.5,
-        },
-        // Phase 1.3: Enable L6 learning — was lr=0.0/wd=0.0
-        6 => LayerParams {
-            threshold: 0.1,
-            learning_rate: 0.001,
-            layer_id: 6,
-            freq_hz: 30.0,
-            weight_decay: 0.0001,
-            precision_eta: 0.005,
-            surprise_threshold: 2.0,
-            top_down_weight: 0.0, // L6 is the top — no layer above
-        },
-        _ => LayerParams {
-            threshold: 0.1,
-            learning_rate: 0.01,
-            layer_id,
-            freq_hz: 10.0,
-            weight_decay: 0.0001,
-            precision_eta: 0.01,
-            surprise_threshold: 2.0,
-            top_down_weight: 0.3,
-        },
+        0 => base(0.1, 0.01, 0, 1000.0, 0.0001, 0.01, 2.0, 0.3),
+        1 => base(0.08, 0.008, 1, 100.0, 0.0001, 0.01, 2.0, 0.3),
+        2 => base(0.05, 0.005, 2, 100.0, 0.00005, 0.008, 2.0, 0.3),
+        3 => base(0.05, 0.005, 3, 100.0, 0.00005, 0.008, 2.0, 0.3),
+        4 => base(0.03, 0.003, 4, 1.0, 0.00001, 0.005, 2.5, 0.4),
+        5 => base(0.02, 0.002, 5, 0.1, 0.00001, 0.003, 3.0, 0.5),
+        6 => base(0.1, 0.001, 6, 30.0, 0.0001, 0.005, 2.0, 0.0),
+        _ => base(0.1, 0.01, layer_id, 10.0, 0.0001, 0.01, 2.0, 0.3),
     }
 }
 
@@ -358,12 +351,16 @@ const LAYER_DESCRIPTIONS: [&str; 7] = [
     "senses",
 ];
 
-/// Load layer weights from a checkpoint file. Returns true if loaded.
+/// Phase 8: Total floats in a full checkpoint (weights + bias + GLU gates + Adam state).
+const CHECKPOINT_FLOATS: usize = WEIGHT_COUNT * 6 + STATE_DIM * 6; // 6 weight arrays + 6 bias arrays
+
+/// Load layer weights from a checkpoint file into raw slot pointer. Returns true if loaded.
+/// Phase 8: loads full state including GLU gates and Adam optimizer moments.
+/// Uses raw pointer to avoid &mut reference casting lint.
 fn load_weights(
     dir: &str,
     layer_id: u8,
-    weights: &mut [f32; WEIGHT_COUNT],
-    bias: &mut [f32; STATE_DIM],
+    slot: *mut qualia_types::LayerSlot,
 ) -> bool {
     let path = format!("{}/layer_{}_weights.bin", dir, layer_id);
     let data = match std::fs::read(&path) {
@@ -371,44 +368,76 @@ fn load_weights(
         Err(_) => return false,
     };
 
-    let expected_len = (WEIGHT_COUNT + STATE_DIM) * std::mem::size_of::<f32>();
-    if data.len() != expected_len {
-        eprintln!(
-            "qualia-l{}: checkpoint {} has wrong size ({} != {}), skipping",
-            layer_id,
-            path,
-            data.len(),
-            expected_len
-        );
-        return false;
+    // Support legacy checkpoints (weights + bias only)
+    let legacy_len = (WEIGHT_COUNT + STATE_DIM) * std::mem::size_of::<f32>();
+    let full_len = CHECKPOINT_FLOATS * std::mem::size_of::<f32>() + std::mem::size_of::<u64>();
+
+    unsafe {
+        if data.len() == legacy_len {
+            let floats: &[f32] =
+                std::slice::from_raw_parts(data.as_ptr() as *const f32, WEIGHT_COUNT + STATE_DIM);
+            (*slot).weights.copy_from_slice(&floats[..WEIGHT_COUNT]);
+            (*slot).bias.copy_from_slice(&floats[WEIGHT_COUNT..]);
+            eprintln!("qualia-l{}: loaded LEGACY checkpoint from {} (no GLU/Adam)", layer_id, path);
+            return true;
+        }
+
+        if data.len() == full_len {
+            let floats: &[f32] =
+                std::slice::from_raw_parts(data.as_ptr() as *const f32, CHECKPOINT_FLOATS);
+            let mut off = 0;
+            (*slot).weights.copy_from_slice(&floats[off..off + WEIGHT_COUNT]); off += WEIGHT_COUNT;
+            (*slot).bias.copy_from_slice(&floats[off..off + STATE_DIM]); off += STATE_DIM;
+            (*slot).gate_w.copy_from_slice(&floats[off..off + WEIGHT_COUNT]); off += WEIGHT_COUNT;
+            (*slot).gate_b.copy_from_slice(&floats[off..off + STATE_DIM]); off += STATE_DIM;
+            (*slot).adam_m_w.copy_from_slice(&floats[off..off + WEIGHT_COUNT]); off += WEIGHT_COUNT;
+            (*slot).adam_v_w.copy_from_slice(&floats[off..off + WEIGHT_COUNT]); off += WEIGHT_COUNT;
+            (*slot).adam_m_b.copy_from_slice(&floats[off..off + STATE_DIM]); off += STATE_DIM;
+            (*slot).adam_v_b.copy_from_slice(&floats[off..off + STATE_DIM]); off += STATE_DIM;
+            (*slot).adam_m_gw.copy_from_slice(&floats[off..off + WEIGHT_COUNT]); off += WEIGHT_COUNT;
+            (*slot).adam_v_gw.copy_from_slice(&floats[off..off + WEIGHT_COUNT]); off += WEIGHT_COUNT;
+            (*slot).adam_m_gb.copy_from_slice(&floats[off..off + STATE_DIM]); off += STATE_DIM;
+            (*slot).adam_v_gb.copy_from_slice(&floats[off..off + STATE_DIM]);
+            let t_bytes = &data[CHECKPOINT_FLOATS * std::mem::size_of::<f32>()..];
+            let adam_t = u64::from_le_bytes(t_bytes[..8].try_into().unwrap());
+            (*slot).adam_t.store(adam_t, std::sync::atomic::Ordering::Relaxed);
+            eprintln!("qualia-l{}: loaded FULL checkpoint from {} (adam_t={})", layer_id, path, adam_t);
+            return true;
+        }
     }
 
-    let floats: &[f32] = unsafe {
-        std::slice::from_raw_parts(data.as_ptr() as *const f32, WEIGHT_COUNT + STATE_DIM)
-    };
-    weights.copy_from_slice(&floats[..WEIGHT_COUNT]);
-    bias.copy_from_slice(&floats[WEIGHT_COUNT..]);
-    eprintln!("qualia-l{}: loaded checkpoint from {}", layer_id, path);
-    true
+    eprintln!(
+        "qualia-l{}: checkpoint {} has wrong size ({}, expected {} or {}), skipping",
+        layer_id, path, data.len(), legacy_len, full_len
+    );
+    false
 }
 
 /// Save layer weights to a checkpoint file (atomic: write .tmp then rename).
+/// Phase 8: saves full state including GLU gates and Adam optimizer moments.
 fn save_weights(
     dir: &str,
     layer_id: u8,
-    weights: &[f32; WEIGHT_COUNT],
-    bias: &[f32; STATE_DIM],
+    slot: &qualia_types::LayerSlot,
 ) {
     let path = format!("{}/layer_{}_weights.bin", dir, layer_id);
     let tmp = format!("{}.tmp", path);
 
-    let mut data = Vec::with_capacity((WEIGHT_COUNT + STATE_DIM) * std::mem::size_of::<f32>());
-    for &w in weights.iter() {
-        data.extend_from_slice(&w.to_le_bytes());
+    let total_bytes = CHECKPOINT_FLOATS * std::mem::size_of::<f32>() + std::mem::size_of::<u64>();
+    let mut data = Vec::with_capacity(total_bytes);
+
+    for arr in [slot.weights.as_slice(), slot.bias.as_slice(),
+                slot.gate_w.as_slice(), slot.gate_b.as_slice(),
+                slot.adam_m_w.as_slice(), slot.adam_v_w.as_slice(),
+                slot.adam_m_b.as_slice(), slot.adam_v_b.as_slice(),
+                slot.adam_m_gw.as_slice(), slot.adam_v_gw.as_slice(),
+                slot.adam_m_gb.as_slice(), slot.adam_v_gb.as_slice()] {
+        for &v in arr {
+            data.extend_from_slice(&v.to_le_bytes());
+        }
     }
-    for &b in bias.iter() {
-        data.extend_from_slice(&b.to_le_bytes());
-    }
+    let adam_t = slot.adam_t.load(std::sync::atomic::Ordering::Relaxed);
+    data.extend_from_slice(&adam_t.to_le_bytes());
 
     if let Err(e) = std::fs::write(&tmp, &data) {
         eprintln!("qualia-l{}: failed to write checkpoint {}: {}", layer_id, tmp, e);
@@ -418,7 +447,7 @@ fn save_weights(
         eprintln!("qualia-l{}: failed to rename checkpoint: {}", layer_id, e);
         return;
     }
-    eprintln!("qualia-l{}: saved checkpoint to {}", layer_id, path);
+    eprintln!("qualia-l{}: saved FULL checkpoint to {} ({} bytes, adam_t={})", layer_id, path, data.len(), adam_t);
 }
 
 /// Run the main loop for a single layer (CUDA backend).
@@ -469,31 +498,37 @@ pub fn run_layer(layer_id: u8, name: &str) {
     let checkpoint_dir = std::env::var("QUALIA_CHECKPOINT_DIR").ok();
 
     // Initialize weights — load checkpoint or fall back to identity matrix
+    // Phase 8: also initialize GLU gates and Adam state
     {
-        let weights = unsafe {
-            let slot_ptr =
-                my_slot as *const qualia_types::LayerSlot as *mut qualia_types::LayerSlot;
-            &mut (*slot_ptr).weights
-        };
-        let bias = unsafe {
-            let slot_ptr =
-                my_slot as *const qualia_types::LayerSlot as *mut qualia_types::LayerSlot;
-            &mut (*slot_ptr).bias
-        };
+        let slot_raw = my_slot as *const qualia_types::LayerSlot as *mut qualia_types::LayerSlot;
 
         let loaded = checkpoint_dir
             .as_deref()
-            .map(|dir| load_weights(dir, layer_id, weights, bias))
+            .map(|dir| load_weights(dir, layer_id, slot_raw))
             .unwrap_or(false);
 
         if !loaded {
-            for i in 0..STATE_DIM {
-                for j in 0..STATE_DIM {
-                    weights[i * STATE_DIM + j] = if i == j { 1.0 } else { 0.0 };
+            unsafe {
+                for i in 0..STATE_DIM {
+                    for j in 0..STATE_DIM {
+                        let idx = i * STATE_DIM + j;
+                        (*slot_raw).weights[idx] = if i == j { 1.0 } else { 0.0 };
+                        (*slot_raw).gate_w[idx] = 0.0;
+                        (*slot_raw).adam_m_w[idx] = 0.0;
+                        (*slot_raw).adam_v_w[idx] = 0.0;
+                        (*slot_raw).adam_m_gw[idx] = 0.0;
+                        (*slot_raw).adam_v_gw[idx] = 0.0;
+                    }
+                    (*slot_raw).bias[i] = 0.0;
+                    (*slot_raw).gate_b[i] = 0.0;
+                    (*slot_raw).adam_m_b[i] = 0.0;
+                    (*slot_raw).adam_v_b[i] = 0.0;
+                    (*slot_raw).adam_m_gb[i] = 0.0;
+                    (*slot_raw).adam_v_gb[i] = 0.0;
                 }
-                bias[i] = 0.0;
+                (*slot_raw).adam_t.store(0, std::sync::atomic::Ordering::Relaxed);
             }
-            eprintln!("qualia-{name}: initialized weights as identity (no checkpoint)");
+            eprintln!("qualia-{name}: initialized weights as identity + GLU/Adam zeroed (no checkpoint)");
         }
     }
 
@@ -588,17 +623,10 @@ pub fn run_layer(layer_id: u8, name: &str) {
         if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
             eprintln!("qualia-{name}: SIGTERM received, saving weights...");
             if let Some(ref dir) = checkpoint_dir {
-                let weights = unsafe {
-                    let slot_ptr =
-                        my_slot as *const qualia_types::LayerSlot as *mut qualia_types::LayerSlot;
-                    &(*slot_ptr).weights
+                let slot_ref = unsafe {
+                    &*(my_slot as *const qualia_types::LayerSlot)
                 };
-                let bias = unsafe {
-                    let slot_ptr =
-                        my_slot as *const qualia_types::LayerSlot as *mut qualia_types::LayerSlot;
-                    &(*slot_ptr).bias
-                };
-                save_weights(dir, layer_id, weights, bias);
+                save_weights(dir, layer_id, slot_ref);
             }
             break;
         }
@@ -611,21 +639,26 @@ pub fn run_layer(layer_id: u8, name: &str) {
         // Phase 5.1: Read belief from the layer above (if it exists)
         let above_belief = above_reader.as_ref().map(|r| *r.read());
 
-        let (weights, bias) = unsafe {
-            let slot_ptr =
-                my_slot as *const qualia_types::LayerSlot as *mut qualia_types::LayerSlot;
-            (&mut (*slot_ptr).weights, &mut (*slot_ptr).bias)
-        };
+        // Phase 8: Extract all mutable buffers from the slot via raw pointer
+        let slot_raw = my_slot as *const qualia_types::LayerSlot as *mut qualia_types::LayerSlot;
+        let mut adam_t_val = unsafe { (*slot_raw).adam_t.load(std::sync::atomic::Ordering::Relaxed) as u32 };
 
         let buf = writer.back_buffer();
         buf.layer = layer_id;
-        cuda.dispatch_belief_update(
-            buf,
-            &below,
-            above_belief.as_ref(),
-            weights,
-            bias,
-        );
+        unsafe {
+            cuda.dispatch_belief_update(
+                buf, &below, above_belief.as_ref(),
+                &mut (*slot_raw).weights, &mut (*slot_raw).bias,
+                &mut (*slot_raw).gate_w, &mut (*slot_raw).gate_b,
+                &mut (*slot_raw).adam_m_w, &mut (*slot_raw).adam_v_w,
+                &mut (*slot_raw).adam_m_b, &mut (*slot_raw).adam_v_b,
+                &mut (*slot_raw).adam_m_gw, &mut (*slot_raw).adam_v_gw,
+                &mut (*slot_raw).adam_m_gb, &mut (*slot_raw).adam_v_gb,
+                &mut adam_t_val,
+            );
+            // Write back the updated adam_t
+            (*slot_raw).adam_t.store(adam_t_val as u64, std::sync::atomic::Ordering::Relaxed);
+        }
 
         // Semantic injection (identical to Metal backend)
         if has_injection {

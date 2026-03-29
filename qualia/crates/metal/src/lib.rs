@@ -13,6 +13,17 @@ pub struct LayerParams {
     pub precision_eta: f32,
     pub surprise_threshold: f32,
     pub top_down_weight: f32,
+    // Phase 8: Adam optimizer hyperparameters
+    pub adam_beta1: f32,
+    pub adam_beta2: f32,
+    pub adam_epsilon: f32,
+    // Phase 8: Langevin exploration noise
+    pub langevin_sigma: f32,
+    // Phase 8: Gradient clipping
+    pub grad_clip_norm: f32,
+    // Phase 8: LR scheduling
+    pub warmup_steps: f32,
+    pub total_steps: f32,
 }
 
 pub struct MetalContext {
@@ -40,19 +51,26 @@ impl MetalContext {
             .new_compute_pipeline_state_with_function(&function)
             .map_err(|e| format!("Pipeline error: {}", e))?;
 
-        let params_data: [f32; 8] = [
-            params.threshold,
-            params.learning_rate,
-            params.layer_id as f32,
-            params.weight_decay,
-            if has_above { 1.0 } else { 0.0 },
-            params.precision_eta,
-            params.surprise_threshold,
-            params.top_down_weight,
+        let params_data: [f32; 15] = [
+            params.threshold,        // [0]
+            params.learning_rate,    // [1]
+            params.layer_id as f32,  // [2]
+            params.weight_decay,     // [3]
+            if has_above { 1.0 } else { 0.0 }, // [4] has_above
+            params.precision_eta,    // [5]
+            params.surprise_threshold, // [6]
+            params.top_down_weight,  // [7]
+            params.adam_beta1,       // [8]
+            params.adam_beta2,       // [9]
+            params.adam_epsilon,     // [10]
+            params.langevin_sigma,   // [11]
+            params.grad_clip_norm,   // [12]
+            params.warmup_steps,     // [13]
+            params.total_steps,      // [14]
         ];
         let params_buf = device.new_buffer_with_data(
             params_data.as_ptr() as *const _,
-            (8 * std::mem::size_of::<f32>()) as u64,
+            (15 * std::mem::size_of::<f32>()) as u64,
             MTLResourceOptions::StorageModeShared,
         );
 
@@ -69,6 +87,7 @@ impl MetalContext {
     }
 
     /// Run belief update kernel on GPU with full generative model.
+    /// Phase 8: passes all 17 buffers including GLU gates and Adam optimizer state.
     pub fn dispatch_belief_update(
         &self,
         belief: &mut BeliefSlot,
@@ -76,6 +95,17 @@ impl MetalContext {
         above: Option<&BeliefSlot>,
         weights: &mut [f32; WEIGHT_COUNT],
         bias: &mut [f32; STATE_DIM],
+        gate_w: &mut [f32; WEIGHT_COUNT],
+        gate_b: &mut [f32; STATE_DIM],
+        adam_m_w: &mut [f32; WEIGHT_COUNT],
+        adam_v_w: &mut [f32; WEIGHT_COUNT],
+        adam_m_b: &mut [f32; STATE_DIM],
+        adam_v_b: &mut [f32; STATE_DIM],
+        adam_m_gw: &mut [f32; WEIGHT_COUNT],
+        adam_v_gw: &mut [f32; WEIGHT_COUNT],
+        adam_m_gb: &mut [f32; STATE_DIM],
+        adam_v_gb: &mut [f32; STATE_DIM],
+        adam_t: &mut u32,
     ) {
         let belief_size = std::mem::size_of::<BeliefSlot>() as u64;
         let weights_size = (WEIGHT_COUNT * std::mem::size_of::<f32>()) as u64;
@@ -109,6 +139,64 @@ impl MetalContext {
             bias_size,
             MTLResourceOptions::StorageModeShared,
         );
+        // Phase 8: GLU gate buffers
+        let gate_w_buf = self.device.new_buffer_with_data(
+            gate_w.as_ptr() as *const _,
+            weights_size,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let gate_b_buf = self.device.new_buffer_with_data(
+            gate_b.as_ptr() as *const _,
+            bias_size,
+            MTLResourceOptions::StorageModeShared,
+        );
+        // Phase 8: Adam optimizer moment buffers
+        let adam_m_w_buf = self.device.new_buffer_with_data(
+            adam_m_w.as_ptr() as *const _,
+            weights_size,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let adam_v_w_buf = self.device.new_buffer_with_data(
+            adam_v_w.as_ptr() as *const _,
+            weights_size,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let adam_m_b_buf = self.device.new_buffer_with_data(
+            adam_m_b.as_ptr() as *const _,
+            bias_size,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let adam_v_b_buf = self.device.new_buffer_with_data(
+            adam_v_b.as_ptr() as *const _,
+            bias_size,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let adam_m_gw_buf = self.device.new_buffer_with_data(
+            adam_m_gw.as_ptr() as *const _,
+            weights_size,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let adam_v_gw_buf = self.device.new_buffer_with_data(
+            adam_v_gw.as_ptr() as *const _,
+            weights_size,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let adam_m_gb_buf = self.device.new_buffer_with_data(
+            adam_m_gb.as_ptr() as *const _,
+            bias_size,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let adam_v_gb_buf = self.device.new_buffer_with_data(
+            adam_v_gb.as_ptr() as *const _,
+            bias_size,
+            MTLResourceOptions::StorageModeShared,
+        );
+        // Phase 8: Adam timestep (atomic_uint in kernel)
+        let adam_t_buf = self.device.new_buffer_with_data(
+            adam_t as *const u32 as *const _,
+            std::mem::size_of::<u32>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
 
         let cmd = self.queue.new_command_buffer();
         let enc = cmd.new_compute_command_encoder();
@@ -120,6 +208,17 @@ impl MetalContext {
         enc.set_buffer(3, Some(&self.params_buf), 0);
         enc.set_buffer(4, Some(&weights_buf), 0);
         enc.set_buffer(5, Some(&bias_buf), 0);
+        enc.set_buffer(6, Some(&gate_w_buf), 0);
+        enc.set_buffer(7, Some(&gate_b_buf), 0);
+        enc.set_buffer(8, Some(&adam_m_w_buf), 0);
+        enc.set_buffer(9, Some(&adam_v_w_buf), 0);
+        enc.set_buffer(10, Some(&adam_m_b_buf), 0);
+        enc.set_buffer(11, Some(&adam_v_b_buf), 0);
+        enc.set_buffer(12, Some(&adam_m_gw_buf), 0);
+        enc.set_buffer(13, Some(&adam_v_gw_buf), 0);
+        enc.set_buffer(14, Some(&adam_m_gb_buf), 0);
+        enc.set_buffer(15, Some(&adam_v_gb_buf), 0);
+        enc.set_buffer(16, Some(&adam_t_buf), 0);
 
         let grid_size = MTLSize::new(STATE_DIM as u64, 1, 1);
         let group_size = MTLSize::new(STATE_DIM as u64, 1, 1);
@@ -129,6 +228,7 @@ impl MetalContext {
         cmd.commit();
         cmd.wait_until_completed();
 
+        // Copy back all mutable buffers
         unsafe {
             std::ptr::copy_nonoverlapping(
                 belief_buf.contents() as *const BeliefSlot,
@@ -145,20 +245,89 @@ impl MetalContext {
                 bias.as_mut_ptr(),
                 STATE_DIM,
             );
+            std::ptr::copy_nonoverlapping(
+                gate_w_buf.contents() as *const f32,
+                gate_w.as_mut_ptr(),
+                WEIGHT_COUNT,
+            );
+            std::ptr::copy_nonoverlapping(
+                gate_b_buf.contents() as *const f32,
+                gate_b.as_mut_ptr(),
+                STATE_DIM,
+            );
+            std::ptr::copy_nonoverlapping(
+                adam_m_w_buf.contents() as *const f32,
+                adam_m_w.as_mut_ptr(),
+                WEIGHT_COUNT,
+            );
+            std::ptr::copy_nonoverlapping(
+                adam_v_w_buf.contents() as *const f32,
+                adam_v_w.as_mut_ptr(),
+                WEIGHT_COUNT,
+            );
+            std::ptr::copy_nonoverlapping(
+                adam_m_b_buf.contents() as *const f32,
+                adam_m_b.as_mut_ptr(),
+                STATE_DIM,
+            );
+            std::ptr::copy_nonoverlapping(
+                adam_v_b_buf.contents() as *const f32,
+                adam_v_b.as_mut_ptr(),
+                STATE_DIM,
+            );
+            std::ptr::copy_nonoverlapping(
+                adam_m_gw_buf.contents() as *const f32,
+                adam_m_gw.as_mut_ptr(),
+                WEIGHT_COUNT,
+            );
+            std::ptr::copy_nonoverlapping(
+                adam_v_gw_buf.contents() as *const f32,
+                adam_v_gw.as_mut_ptr(),
+                WEIGHT_COUNT,
+            );
+            std::ptr::copy_nonoverlapping(
+                adam_m_gb_buf.contents() as *const f32,
+                adam_m_gb.as_mut_ptr(),
+                STATE_DIM,
+            );
+            std::ptr::copy_nonoverlapping(
+                adam_v_gb_buf.contents() as *const f32,
+                adam_v_gb.as_mut_ptr(),
+                STATE_DIM,
+            );
+            *adam_t = *(adam_t_buf.contents() as *const u32);
         }
     }
 }
 
+/// Phase 8: Common Adam/Langevin/LR defaults shared across layers.
+const ADAM_BETA1: f32 = 0.9;
+const ADAM_BETA2: f32 = 0.999;
+const ADAM_EPSILON: f32 = 1e-8;
+const LANGEVIN_SIGMA: f32 = 0.01;
+const GRAD_CLIP_NORM: f32 = 1.0;
+const WARMUP_STEPS: f32 = 100.0;
+const TOTAL_STEPS: f32 = 10000.0;
+
 pub fn default_params(layer_id: u8) -> LayerParams {
+    let base = |threshold, learning_rate, lid, freq_hz, weight_decay, precision_eta, surprise_threshold, top_down_weight| {
+        LayerParams {
+            threshold, learning_rate, layer_id: lid, freq_hz, weight_decay, precision_eta,
+            surprise_threshold, top_down_weight,
+            adam_beta1: ADAM_BETA1, adam_beta2: ADAM_BETA2, adam_epsilon: ADAM_EPSILON,
+            langevin_sigma: LANGEVIN_SIGMA, grad_clip_norm: GRAD_CLIP_NORM,
+            warmup_steps: WARMUP_STEPS, total_steps: TOTAL_STEPS,
+        }
+    };
     match layer_id {
-        0 => LayerParams { threshold: 0.1, learning_rate: 0.01, layer_id: 0, freq_hz: 1000.0, weight_decay: 0.0001, precision_eta: 0.01, surprise_threshold: 2.0, top_down_weight: 0.3 },
-        1 => LayerParams { threshold: 0.08, learning_rate: 0.008, layer_id: 1, freq_hz: 100.0, weight_decay: 0.0001, precision_eta: 0.01, surprise_threshold: 2.0, top_down_weight: 0.3 },
-        2 => LayerParams { threshold: 0.05, learning_rate: 0.005, layer_id: 2, freq_hz: 100.0, weight_decay: 0.00005, precision_eta: 0.008, surprise_threshold: 2.0, top_down_weight: 0.3 },
-        3 => LayerParams { threshold: 0.05, learning_rate: 0.005, layer_id: 3, freq_hz: 100.0, weight_decay: 0.00005, precision_eta: 0.008, surprise_threshold: 2.0, top_down_weight: 0.3 },
-        4 => LayerParams { threshold: 0.03, learning_rate: 0.003, layer_id: 4, freq_hz: 1.0, weight_decay: 0.00001, precision_eta: 0.005, surprise_threshold: 2.5, top_down_weight: 0.4 },
-        5 => LayerParams { threshold: 0.02, learning_rate: 0.002, layer_id: 5, freq_hz: 0.1, weight_decay: 0.00001, precision_eta: 0.003, surprise_threshold: 3.0, top_down_weight: 0.5 },
-        6 => LayerParams { threshold: 0.1, learning_rate: 0.001, layer_id: 6, freq_hz: 30.0, weight_decay: 0.0001, precision_eta: 0.005, surprise_threshold: 2.0, top_down_weight: 0.0 },
-        _ => LayerParams { threshold: 0.1, learning_rate: 0.01, layer_id, freq_hz: 10.0, weight_decay: 0.0001, precision_eta: 0.01, surprise_threshold: 2.0, top_down_weight: 0.3 },
+        0 => base(0.1, 0.01, 0, 1000.0, 0.0001, 0.01, 2.0, 0.3),
+        1 => base(0.08, 0.008, 1, 100.0, 0.0001, 0.01, 2.0, 0.3),
+        2 => base(0.05, 0.005, 2, 100.0, 0.00005, 0.008, 2.0, 0.3),
+        3 => base(0.05, 0.005, 3, 100.0, 0.00005, 0.008, 2.0, 0.3),
+        4 => base(0.03, 0.003, 4, 1.0, 0.00001, 0.005, 2.5, 0.4),
+        5 => base(0.02, 0.002, 5, 0.1, 0.00001, 0.003, 3.0, 0.5),
+        6 => base(0.1, 0.001, 6, 30.0, 0.0001, 0.005, 2.0, 0.0),
+        _ => base(0.1, 0.01, layer_id, 10.0, 0.0001, 0.01, 2.0, 0.3),
     }
 }
 
@@ -223,23 +392,28 @@ pub fn run_layer(layer_id: u8, name: &str) {
         Duration::from_secs(60)
     };
 
-    // Initialize weights as identity matrix
+    // Initialize weights as identity matrix, GLU gates to zero, Adam state to zero
     {
-        let weights = unsafe {
-            let slot_ptr = my_slot as *const qualia_types::LayerSlot
-                as *mut qualia_types::LayerSlot;
-            &mut (*slot_ptr).weights
-        };
-        let bias = unsafe {
-            let slot_ptr = my_slot as *const qualia_types::LayerSlot
-                as *mut qualia_types::LayerSlot;
-            &mut (*slot_ptr).bias
-        };
-        for i in 0..STATE_DIM {
-            for j in 0..STATE_DIM {
-                weights[i * STATE_DIM + j] = if i == j { 1.0 } else { 0.0 };
+        let slot_raw = my_slot as *const qualia_types::LayerSlot as *mut qualia_types::LayerSlot;
+        unsafe {
+            for i in 0..STATE_DIM {
+                for j in 0..STATE_DIM {
+                    let idx = i * STATE_DIM + j;
+                    (*slot_raw).weights[idx] = if i == j { 1.0 } else { 0.0 };
+                    (*slot_raw).gate_w[idx] = 0.0;
+                    (*slot_raw).adam_m_w[idx] = 0.0;
+                    (*slot_raw).adam_v_w[idx] = 0.0;
+                    (*slot_raw).adam_m_gw[idx] = 0.0;
+                    (*slot_raw).adam_v_gw[idx] = 0.0;
+                }
+                (*slot_raw).bias[i] = 0.0;
+                (*slot_raw).gate_b[i] = 0.0;
+                (*slot_raw).adam_m_b[i] = 0.0;
+                (*slot_raw).adam_v_b[i] = 0.0;
+                (*slot_raw).adam_m_gb[i] = 0.0;
+                (*slot_raw).adam_v_gb[i] = 0.0;
             }
-            bias[i] = 0.0;
+            (*slot_raw).adam_t.store(0, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -323,15 +497,26 @@ pub fn run_layer(layer_id: u8, name: &str) {
         let below = *reader.read();
         let above_belief = above_reader.as_ref().map(|r| *r.read());
 
-        let (weights, bias) = unsafe {
-            let slot_ptr =
-                my_slot as *const qualia_types::LayerSlot as *mut qualia_types::LayerSlot;
-            (&mut (*slot_ptr).weights, &mut (*slot_ptr).bias)
-        };
+        // Phase 8: Extract all mutable buffers from the slot via raw pointer
+        let slot_raw = my_slot as *const qualia_types::LayerSlot as *mut qualia_types::LayerSlot;
+        let mut adam_t_val = unsafe { (*slot_raw).adam_t.load(std::sync::atomic::Ordering::Relaxed) as u32 };
 
         let buf = writer.back_buffer();
         buf.layer = layer_id;
-        metal.dispatch_belief_update(buf, &below, above_belief.as_ref(), weights, bias);
+        unsafe {
+            metal.dispatch_belief_update(
+                buf, &below, above_belief.as_ref(),
+                &mut (*slot_raw).weights, &mut (*slot_raw).bias,
+                &mut (*slot_raw).gate_w, &mut (*slot_raw).gate_b,
+                &mut (*slot_raw).adam_m_w, &mut (*slot_raw).adam_v_w,
+                &mut (*slot_raw).adam_m_b, &mut (*slot_raw).adam_v_b,
+                &mut (*slot_raw).adam_m_gw, &mut (*slot_raw).adam_v_gw,
+                &mut (*slot_raw).adam_m_gb, &mut (*slot_raw).adam_v_gb,
+                &mut adam_t_val,
+            );
+            // Write back the updated adam_t
+            (*slot_raw).adam_t.store(adam_t_val as u64, std::sync::atomic::Ordering::Relaxed);
+        }
 
         // ── Semantic injection ──────────────────────────────────
         // Blend the LLM's scene_embedding into this layer's beliefs.
