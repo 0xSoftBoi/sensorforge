@@ -7,8 +7,14 @@ use std::time::SystemTime;
 /// Sensor layer — L6 holds raw sensory input that L0 reads from.
 const SENSOR_LAYER: usize = 6;
 
-/// Phase 2.1: Capture at 16×16 for DCT, take top 64 coefficients.
-const GRID_SIZE: usize = 16; // 16×16 capture → DCT → 64 features
+/// Phase 7.5: Multi-scale DCT pyramid.
+/// Capture at 16×16, but extract features at two scales:
+///   - 8×8 coarse (global structure, 16 coefficients)
+///   - 16×16 fine (local detail, 48 coefficients)
+/// Total: 16 + 48 = 64 features = STATE_DIM
+const GRID_SIZE: usize = 16;
+const COARSE_FEATURES: usize = 16;  // from 8×8 DCT
+const FINE_FEATURES: usize = 48;    // from 16×16 DCT
 
 fn main() {
     let shm_name =
@@ -22,7 +28,6 @@ fn main() {
     let slot = shm.layer_slot(SENSOR_LAYER);
     let writer = LayerWriter::new(slot);
 
-    // Initialize the sensor slot
     {
         let buf = writer.back_buffer();
         buf.layer = SENSOR_LAYER as u8;
@@ -32,10 +37,8 @@ fn main() {
         writer.publish();
     }
 
-    eprintln!("qualia-camera: starting webcam capture via ffmpeg...");
-    eprintln!("qualia-camera: 16x16 grayscale → DCT → 64 features → L{SENSOR_LAYER}");
+    eprintln!("qualia-camera: Phase 7.5 multi-scale DCT pyramid (8×8 coarse + 16×16 fine → 64 features)");
 
-    // Try ffmpeg first, fall back to synthetic data
     match start_ffmpeg() {
         Ok(mut child) => {
             let stderr_pipe = child.stderr.take();
@@ -78,10 +81,6 @@ fn start_ffmpeg() -> Result<std::process::Child, std::io::Error> {
     } else {
         cmd.args(["-f", "v4l2", "-video_size", "640x480", "-i", &device]);
     }
-    // Phase 2.1: Capture at 16×16 for DCT (was 8×8)
-    // Two outputs from one device:
-    //   1) 16x16 grayscale rawvideo → pipe:1 (SHM at 30fps)
-    //   2) Full-res JPEG snapshot → /tmp/qualia-camera-latest.jpg (vision at 1fps)
     cmd.args([
         "-filter_complex", "[0:v]split=2[shm][snap];[shm]scale=16:16,format=gray[low]",
         "-map", "[low]", "-f", "rawvideo", "-r", "30", "pipe:1",
@@ -94,7 +93,6 @@ fn start_ffmpeg() -> Result<std::process::Child, std::io::Error> {
 }
 
 /// Precompute DCT-II basis for NxN transform.
-/// basis[u][x] = cos(π * (2*x + 1) * u / (2*N)) * norm
 fn precompute_dct_basis<const N: usize>() -> [[f32; N]; N] {
     let mut basis = [[0.0f32; N]; N];
     let n = N as f32;
@@ -111,11 +109,8 @@ fn precompute_dct_basis<const N: usize>() -> [[f32; N]; N] {
     basis
 }
 
-/// Apply 2D DCT to a 16×16 grayscale image, return top 64 coefficients in zigzag order.
-/// This extracts frequency-domain features: edges, textures, spatial structure.
-fn dct_16x16_to_64(pixels: &[f32; 256], basis: &[[f32; 16]; 16]) -> [f32; 64] {
-    // Step 1: 2D DCT via separable 1D transforms
-    // Row transform
+/// Apply 2D DCT to a 16×16 image and return top N coefficients in zigzag order.
+fn dct_2d_zigzag(pixels: &[f32; 256], basis: &[[f32; 16]; 16], n_coeffs: usize) -> Vec<f32> {
     let mut row_dct = [0.0f32; 256];
     for y in 0..16 {
         for u in 0..16 {
@@ -127,7 +122,6 @@ fn dct_16x16_to_64(pixels: &[f32; 256], basis: &[[f32; 16]; 16]) -> [f32; 64] {
         }
     }
 
-    // Column transform
     let mut dct = [0.0f32; 256];
     for u in 0..16 {
         for v in 0..16 {
@@ -139,7 +133,7 @@ fn dct_16x16_to_64(pixels: &[f32; 256], basis: &[[f32; 16]; 16]) -> [f32; 64] {
         }
     }
 
-    // Step 2: Zigzag scan to get top 64 coefficients (low-frequency first)
+    // Zigzag scan for 16×16
     let zigzag_order: [usize; 64] = [
          0,  1, 16,  2, 17, 32,  3, 18,
         33, 48,  4, 19, 34, 49, 64,  5,
@@ -151,8 +145,8 @@ fn dct_16x16_to_64(pixels: &[f32; 256], basis: &[[f32; 16]; 16]) -> [f32; 64] {
         25, 40, 55, 70, 85,100,115,130,
     ];
 
-    let mut features = [0.0f32; 64];
-    for (i, &idx) in zigzag_order.iter().enumerate() {
+    let mut features = vec![0.0f32; n_coeffs];
+    for (i, &idx) in zigzag_order.iter().enumerate().take(n_coeffs) {
         if idx < 256 {
             features[i] = dct[idx];
         }
@@ -160,35 +154,123 @@ fn dct_16x16_to_64(pixels: &[f32; 256], basis: &[[f32; 16]; 16]) -> [f32; 64] {
     features
 }
 
+/// Phase 7.5: Downsample 16×16 to 8×8 by averaging 2×2 blocks.
+fn downsample_8x8(pixels: &[f32; 256]) -> [f32; 64] {
+    let mut coarse = [0.0f32; 64];
+    for by in 0..8 {
+        for bx in 0..8 {
+            let mut sum = 0.0f32;
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    sum += pixels[(by * 2 + dy) * 16 + bx * 2 + dx];
+                }
+            }
+            coarse[by * 8 + bx] = sum * 0.25;
+        }
+    }
+    coarse
+}
+
+/// Apply 2D DCT to an 8×8 image and return top N coefficients in zigzag order.
+fn dct_8x8_zigzag(pixels: &[f32; 64], basis: &[[f32; 8]; 8], n_coeffs: usize) -> Vec<f32> {
+    let mut row_dct = [0.0f32; 64];
+    for y in 0..8 {
+        for u in 0..8 {
+            let mut sum = 0.0f32;
+            for x in 0..8 {
+                sum += pixels[y * 8 + x] * basis[u][x];
+            }
+            row_dct[y * 8 + u] = sum;
+        }
+    }
+
+    let mut dct = [0.0f32; 64];
+    for u in 0..8 {
+        for v in 0..8 {
+            let mut sum = 0.0f32;
+            for y in 0..8 {
+                sum += row_dct[y * 8 + u] * basis[v][y];
+            }
+            dct[v * 8 + u] = sum;
+        }
+    }
+
+    // Zigzag scan for 8×8
+    let zigzag_8x8: [usize; 64] = [
+         0,  1,  8,  2,  9, 16,  3, 10,
+        17, 24,  4, 11, 18, 25, 32,  5,
+        12, 19, 26, 33, 40,  6, 13, 20,
+        27, 34, 41, 48,  7, 14, 21, 28,
+        35, 42, 49, 56, 15, 22, 29, 36,
+        43, 50, 57, 23, 30, 37, 44, 51,
+        58, 31, 38, 45, 52, 59, 39, 46,
+        53, 60, 47, 54, 61, 55, 62, 63,
+    ];
+
+    let mut features = vec![0.0f32; n_coeffs];
+    for (i, &idx) in zigzag_8x8.iter().enumerate().take(n_coeffs) {
+        if idx < 64 {
+            features[i] = dct[idx];
+        }
+    }
+    features
+}
+
+/// Phase 7.5: Multi-scale DCT feature extraction.
+/// Returns 64 features: [16 coarse (8×8 global) | 48 fine (16×16 detail)]
+fn multiscale_dct_features(
+    pixels: &[f32; 256],
+    basis_16: &[[f32; 16]; 16],
+    basis_8: &[[f32; 8]; 8],
+) -> [f32; 64] {
+    // Coarse scale: 8×8 (global structure — blob shapes, overall brightness gradient)
+    let coarse_pixels = downsample_8x8(pixels);
+    let coarse = dct_8x8_zigzag(&coarse_pixels, basis_8, COARSE_FEATURES);
+
+    // Fine scale: 16×16 (local detail — edges, textures, fine structure)
+    let fine = dct_2d_zigzag(pixels, basis_16, FINE_FEATURES);
+
+    let mut features = [0.0f32; 64];
+    for i in 0..COARSE_FEATURES {
+        features[i] = coarse[i];
+    }
+    for i in 0..FINE_FEATURES {
+        features[COARSE_FEATURES + i] = fine[i];
+    }
+    features
+}
+
 fn run_camera_loop(writer: &LayerWriter, mut reader: impl Read) {
-    let frame_size = GRID_SIZE * GRID_SIZE; // 256 bytes per frame (16×16)
+    let frame_size = GRID_SIZE * GRID_SIZE;
     let mut frame_buf = vec![0u8; frame_size];
     let mut frame_count: u64 = 0;
 
-    // Precompute DCT basis once
-    let basis = precompute_dct_basis::<16>();
+    // Precompute DCT bases for both scales
+    let basis_16 = precompute_dct_basis::<16>();
+    let basis_8 = precompute_dct_basis::<8>();
 
     // EMA for variance tracking (Phase 1.3: dynamic precision)
     let mut pixel_ema = [0.0f32; 64];
     let mut pixel_var = [0.0f32; 64];
 
-    eprintln!("qualia-camera: webcam streaming (16×16 → DCT → 64 features)...");
+    // Phase 7.5: Frame-to-frame temporal difference for change detection
+    let mut prev_features = [0.0f32; 64];
+
+    eprintln!("qualia-camera: webcam streaming (multi-scale DCT → 64 features)...");
 
     loop {
-        // Read one 16×16 grayscale frame from ffmpeg
         if reader.read_exact(&mut frame_buf).is_err() {
             eprintln!("qualia-camera: ffmpeg stream ended");
             break;
         }
 
-        // Convert grayscale bytes to normalized f32 [0.0, 1.0]
         let mut pixels = [0.0f32; 256];
         for i in 0..256 {
             pixels[i] = frame_buf[i] as f32 / 255.0;
         }
 
-        // Phase 2.1: Apply 2D DCT and extract top 64 frequency features
-        let features = dct_16x16_to_64(&pixels, &basis);
+        // Phase 7.5: Multi-scale DCT pyramid
+        let features = multiscale_dct_features(&pixels, &basis_16, &basis_8);
 
         let buf = writer.back_buffer();
         buf.layer = SENSOR_LAYER as u8;
@@ -197,8 +279,7 @@ fn run_camera_loop(writer: &LayerWriter, mut reader: impl Read) {
             buf.mean[i] = features[i];
         }
 
-        // Phase 1.3: Dynamic precision from pixel variance
-        // High variance → lower precision (uncertain), low variance → higher precision
+        // Phase 7.5: Adaptive precision from both variance AND temporal change
         let var_alpha = 0.05f32;
         for i in 0..STATE_DIM {
             let val = features[i];
@@ -206,11 +287,17 @@ fn run_camera_loop(writer: &LayerWriter, mut reader: impl Read) {
             let dev = val - pixel_ema[i];
             pixel_var[i] = pixel_var[i] * (1.0 - var_alpha) + dev * dev * var_alpha;
 
-            // Precision inversely proportional to variance
-            // High variance → low precision (0.5), low variance → high precision (10.0)
+            // Temporal change: how much this feature changed from last frame
+            let temporal_change = (val - prev_features[i]).abs();
+
+            // Precision: inversely proportional to variance + temporal change
+            // High variance or rapid change → low precision (uncertain)
             let var_clamped = pixel_var[i].max(0.001);
-            buf.precision[i] = (1.0 / (var_clamped * 10.0 + 0.1)).clamp(0.5, 10.0);
+            let temporal_factor = 1.0 + temporal_change * 5.0;
+            buf.precision[i] = (1.0 / (var_clamped * 10.0 * temporal_factor + 0.1)).clamp(0.5, 10.0);
         }
+
+        prev_features = features;
 
         buf.vfe = 0.0;
         buf.challenge_vfe = 0.0;
@@ -227,7 +314,7 @@ fn run_camera_loop(writer: &LayerWriter, mut reader: impl Read) {
             let mean_var: f32 = pixel_var.iter().sum::<f32>() / STATE_DIM as f32;
             let mean_prec: f32 = (0..STATE_DIM).map(|i| buf.precision[i]).sum::<f32>() / STATE_DIM as f32;
             eprintln!(
-                "qualia-camera: {} frames, mean_var={:.4}, mean_prec={:.2}",
+                "qualia-camera: {} frames, mean_var={:.4}, mean_prec={:.2} (multi-scale)",
                 frame_count, mean_var, mean_prec
             );
         }
@@ -237,19 +324,20 @@ fn run_camera_loop(writer: &LayerWriter, mut reader: impl Read) {
 fn run_synthetic_loop(writer: &LayerWriter) {
     use std::time::{Duration, Instant};
 
-    eprintln!("qualia-camera: generating synthetic visual patterns (DCT)...");
+    eprintln!("qualia-camera: generating synthetic visual patterns (multi-scale DCT)...");
 
-    let basis = precompute_dct_basis::<16>();
+    let basis_16 = precompute_dct_basis::<16>();
+    let basis_8 = precompute_dct_basis::<8>();
     let mut t: f64 = 0.0;
-    let tick = Duration::from_millis(33); // ~30fps
+    let tick = Duration::from_millis(33);
 
     let mut pixel_ema = [0.0f32; 64];
     let mut pixel_var = [0.0f32; 64];
+    let mut prev_features = [0.0f32; 64];
 
     loop {
         let start = Instant::now();
 
-        // Generate 16×16 synthetic scene
         let mut pixels = [0.0f32; 256];
         for i in 0..256 {
             let x = (i % 16) as f64 / 16.0;
@@ -265,7 +353,7 @@ fn run_synthetic_loop(writer: &LayerWriter) {
             pixels[i] = (blob * 0.6 + edge * 0.3 + noise) as f32;
         }
 
-        let features = dct_16x16_to_64(&pixels, &basis);
+        let features = multiscale_dct_features(&pixels, &basis_16, &basis_8);
 
         let buf = writer.back_buffer();
         buf.layer = SENSOR_LAYER as u8;
@@ -277,9 +365,13 @@ fn run_synthetic_loop(writer: &LayerWriter) {
             pixel_ema[i] = pixel_ema[i] * (1.0 - var_alpha) + val * var_alpha;
             let dev = val - pixel_ema[i];
             pixel_var[i] = pixel_var[i] * (1.0 - var_alpha) + dev * dev * var_alpha;
+            let temporal_change = (val - prev_features[i]).abs();
             let var_clamped = pixel_var[i].max(0.001);
-            buf.precision[i] = (1.0 / (var_clamped * 10.0 + 0.1)).clamp(0.5, 10.0);
+            let temporal_factor = 1.0 + temporal_change * 5.0;
+            buf.precision[i] = (1.0 / (var_clamped * 10.0 * temporal_factor + 0.1)).clamp(0.5, 10.0);
         }
+
+        prev_features = features;
 
         buf.vfe = 0.0;
         buf.challenge_vfe = 0.0;

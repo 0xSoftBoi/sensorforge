@@ -184,11 +184,15 @@ pub const WEIGHT_COUNT: usize = STATE_DIM * STATE_DIM; // 4096
 pub struct LayerSlot {
     pub buffers: [BeliefSlot; 2],
     /// Generative model weights: W[i][j] = weights[i * STATE_DIM + j]
-    /// prediction = W @ mean + bias
+    /// Phase 7: GLU prediction = (W @ mean + bias) ⊙ σ(gate_w @ mean + gate_b)
     /// Stored in shared memory so every process can inspect them.
     pub weights: [f32; WEIGHT_COUNT],
     /// Generative model bias vector.
     pub bias: [f32; STATE_DIM],
+    /// GLU gate weights (Phase 7): σ(gate_w @ mean + gate_b) controls information flow.
+    pub gate_w: [f32; WEIGHT_COUNT],
+    /// GLU gate bias.
+    pub gate_b: [f32; STATE_DIM],
     /// Adam optimizer first moment (momentum) for weights.
     pub adam_m_w: [f32; WEIGHT_COUNT],
     /// Adam optimizer second moment (RMSProp) for weights.
@@ -197,6 +201,14 @@ pub struct LayerSlot {
     pub adam_m_b: [f32; STATE_DIM],
     /// Adam second moment for bias.
     pub adam_v_b: [f32; STATE_DIM],
+    /// Adam first moment for gate weights.
+    pub adam_m_gw: [f32; WEIGHT_COUNT],
+    /// Adam second moment for gate weights.
+    pub adam_v_gw: [f32; WEIGHT_COUNT],
+    /// Adam first moment for gate bias.
+    pub adam_m_gb: [f32; STATE_DIM],
+    /// Adam second moment for gate bias.
+    pub adam_v_gb: [f32; STATE_DIM],
     /// Adam timestep counter (per-layer, incremented each weight update).
     pub adam_t: AtomicU64,
     pub write_idx: AtomicUsize,

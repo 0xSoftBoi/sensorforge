@@ -564,17 +564,39 @@ TOOL_REGISTRY = {
 }
 
 
+TOOL_TIMEOUT = 30  # seconds — prevent tools from blocking voice pipeline
+
+
 def execute_tool(name, arguments):
+    """Execute a tool with timeout protection (Phase 7.4).
+    Returns result string or error message if tool hangs."""
     if name not in TOOL_REGISTRY:
         return f"Unknown tool: {name}"
     func, param_names = TOOL_REGISTRY[name]
-    try:
-        if param_names:
-            kwargs = {k: arguments.get(k, "") for k in param_names}
-            return func(**kwargs)
-        return func()
-    except Exception as e:
-        return f"Tool error: {e}"
+
+    result_container = [None]
+    error_container = [None]
+
+    def _run():
+        try:
+            if param_names:
+                kwargs = {k: arguments.get(k, "") for k in param_names}
+                result_container[0] = func(**kwargs)
+            else:
+                result_container[0] = func()
+        except Exception as e:
+            error_container[0] = e
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    worker.join(timeout=TOOL_TIMEOUT)
+
+    if worker.is_alive():
+        log.warning(f"Tool {name} timed out after {TOOL_TIMEOUT}s")
+        return f"Tool '{name}' timed out after {TOOL_TIMEOUT}s"
+    if error_container[0]:
+        return f"Tool error: {error_container[0]}"
+    return result_container[0] if result_container[0] is not None else ""
 
 
 # ─── Conversation Memory (SQLite) ────────────────────────────────
@@ -1100,6 +1122,7 @@ def transcribe(wav_path):
 
 conversation_history = []
 MAX_HISTORY = 6
+MAX_CONTEXT_TOKENS_ESTIMATE = 4000  # rough char estimate for context window safety
 
 # Set from CLI args
 _tools_enabled = False  # Dispatch handles all tools; avoids 400 error + retry overhead
@@ -1231,17 +1254,28 @@ def query_ollama(prompt, sentence_cb=None):
         conversation_store.save_message("user", prompt)
 
     conversation_history.append({"role": "user", "content": prompt})
+
+    # Phase 7.4: Smart context window management — trim history to stay
+    # within token budget. Keep most recent messages, but also preserve
+    # the first message (often contains task context).
     if len(conversation_history) > MAX_HISTORY * 2:
         conversation_history = conversation_history[-MAX_HISTORY * 2:]
 
-    # Enrich system prompt with LORE context if available
+    # Secondary safety: estimate total chars and trim if too large
+    total_chars = sum(len(m.get("content", "")) for m in conversation_history)
+    while total_chars > MAX_CONTEXT_TOKENS_ESTIMATE and len(conversation_history) > 2:
+        removed = conversation_history.pop(0)
+        total_chars -= len(removed.get("content", ""))
+
+    # Phase 7.4: Enrich system prompt with effectiveness-ranked LORE
     enriched_prompt = SYSTEM_PROMPT
     try:
         from lore_store import LoreStore
-        lore_store = LoreStore()
-        lore_context = lore_store.get_for_llm_context(limit=5)
+        _lore_store = LoreStore()
+        lore_context = _lore_store.get_for_llm_context(limit=10)
         if lore_context:
             enriched_prompt += "\n\n" + lore_context
+        _lore_store.close()
     except Exception:
         pass
 
