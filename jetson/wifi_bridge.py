@@ -10,9 +10,12 @@ Usage:
     python3 wifi_bridge.py --port 9876      # Custom port
 """
 
+import hashlib
+import hmac
 import json
 import logging
 import os
+import secrets
 import socket
 import struct
 import subprocess
@@ -40,6 +43,65 @@ from protocol.messages import (
 )
 
 log = logging.getLogger("wifi-bridge")
+
+# ── HMAC Authentication ──────────────────────────────────────────
+
+_SECRET = os.environ.get("SENSORFORGE_SECRET", "").encode()
+if not _SECRET:
+    log.critical(
+        "SENSORFORGE_SECRET is not set — running in dev mode with NO authentication!"
+    )
+
+# Tracks which socket file descriptors have completed the HMAC handshake.
+_authenticated_sockets: set = set()
+_auth_lock = threading.Lock()
+
+# ── Lazy UGV Driver Singleton ────────────────────────────────────
+
+_ugv_driver = None
+_ugv_driver_attempted = False
+
+
+def _get_ugv_driver():
+    global _ugv_driver, _ugv_driver_attempted
+    if _ugv_driver_attempted:
+        return _ugv_driver
+    _ugv_driver_attempted = True
+    try:
+        from ugv_driver import UGVDriver
+        _ugv_driver = UGVDriver()
+        log.info("UGV driver initialized")
+    except Exception as e:
+        log.warning("UGV driver unavailable: %s", e)
+    return _ugv_driver
+
+
+def _read_ugv_status() -> "UGVStatus":
+    """Read real UGV telemetry, falling back to zeros."""
+    ugv = UGVStatus(battery_v=0.0, moving=False)
+    driver = _get_ugv_driver()
+    if driver:
+        try:
+            v = driver.get_battery_voltage()
+            if v is not None:
+                ugv.battery_v = round(v, 2)
+        except Exception:
+            pass
+        try:
+            left, right = driver.get_wheel_speeds()
+            ugv.wheel_speed_left = round(left, 3)
+            ugv.wheel_speed_right = round(right, 3)
+            ugv.moving = abs(left) > 0.01 or abs(right) > 0.01
+        except Exception:
+            pass
+        try:
+            imu = driver.get_imu_cached()
+            if imu and "yaw" in imu:
+                ugv.heading_deg = round(imu["yaw"], 1)
+        except Exception:
+            pass
+    return ugv
+
 
 # ── mDNS Advertisement (Avahi on Linux, dns-sd on macOS) ─────────
 
@@ -150,8 +212,46 @@ def handle_client(conn: socket.socket, addr: tuple):
     """Handle a single iPhone client connection."""
     log.info("Client connected: %s:%d", addr[0], addr[1])
     conn.settimeout(30.0)
+    sock_fd = conn.fileno()
 
     try:
+        # ── HMAC challenge-response ──────────────────────────────
+        if _SECRET:
+            nonce = secrets.token_bytes(32)
+            _send_message(conn, {"type": "challenge", "nonce": nonce.hex()})
+
+            # Read the auth response (first message must be auth)
+            header = _recv_exact(conn, 4)
+            if header is None:
+                log.warning("Auth: client %s disconnected before auth", addr[0])
+                return
+            length = struct.unpack(">I", header)[0]
+            if length > 1_000_000:
+                log.warning("Auth: oversized message from %s", addr[0])
+                return
+            payload = _recv_exact(conn, length)
+            if payload is None:
+                return
+            auth_msg = json.loads(payload.decode("utf-8"))
+            if auth_msg.get("type") != "auth":
+                log.warning("Auth: expected auth message from %s, got %s", addr[0], auth_msg.get("type"))
+                _send_message(conn, {"type": "auth_fail", "reason": "expected auth message"})
+                return
+            expected_hmac = hmac.new(_SECRET, nonce, hashlib.sha256).hexdigest()
+            provided_hmac = auth_msg.get("hmac", "")
+            if not hmac.compare_digest(expected_hmac, provided_hmac):
+                log.warning("Auth: HMAC mismatch from %s — rejecting", addr[0])
+                _send_message(conn, {"type": "auth_fail", "reason": "invalid hmac"})
+                return
+            with _auth_lock:
+                _authenticated_sockets.add(sock_fd)
+            log.info("Auth: client %s:%d authenticated", addr[0], addr[1])
+            _send_message(conn, {"type": "auth_ok"})
+        else:
+            # Dev mode: no secret set, skip auth
+            with _auth_lock:
+                _authenticated_sockets.add(sock_fd)
+
         while True:
             # Read 4-byte length header
             header = _recv_exact(conn, 4)
@@ -168,6 +268,13 @@ def handle_client(conn: socket.socket, addr: tuple):
 
             msg = json.loads(payload.decode("utf-8"))
             msg_type = msg.get("type", "")
+
+            # Reject unauthenticated sockets (belt-and-suspenders)
+            with _auth_lock:
+                is_auth = sock_fd in _authenticated_sockets
+            if not is_auth:
+                log.warning("Rejected message from unauthenticated socket %s", addr[0])
+                break
 
             if msg_type == "handshake":
                 _handle_handshake(conn, msg)
@@ -189,6 +296,8 @@ def handle_client(conn: socket.socket, addr: tuple):
     except json.JSONDecodeError as e:
         log.error("JSON decode error from %s: %s", addr[0], e)
     finally:
+        with _auth_lock:
+            _authenticated_sockets.discard(sock_fd)
         sensor_store.connected_device = None
         conn.close()
         log.info("Client %s:%d closed", addr[0], addr[1])
@@ -232,17 +341,7 @@ def _handle_sensor_frame(msg: dict):
 
 def _handle_status_request(conn: socket.socket):
     qualia = get_qualia_status()
-    ugv = UGVStatus(battery_v=0.0, moving=False)
-
-    # Try to get real UGV status
-    try:
-        from ugv_driver import UGVDriver
-        driver = UGVDriver()
-        status = driver.read_status()
-        if status:
-            ugv.battery_v = status.get("battery_v", 0.0)
-    except Exception:
-        pass
+    ugv = _read_ugv_status()
 
     resp = StatusResponse(
         voice_state="idle",
@@ -258,6 +357,10 @@ def _handle_command(conn: socket.socket, msg: dict):
 
     result = "Unknown command"
     success = False
+
+    if cmd.action == "robot_status":
+        _handle_status_request(conn)
+        return
 
     try:
         if cmd.action == "set_directive":
@@ -323,12 +426,20 @@ def run_http_status_server(port: int = HTTP_PORT):
     """Lightweight HTTP server for the web dashboard to fetch robot telemetry."""
     from http.server import HTTPServer, BaseHTTPRequestHandler
 
+    def _cors_origin(origin: str) -> str:
+        """Return the origin if it is localhost, otherwise empty string."""
+        import re
+        if origin and re.match(r'^http://localhost(:\d+)?$', origin):
+            return origin
+        return ""
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path == "/status":
                 qualia = get_qualia_status()
                 frame = sensor_store.get_latest()
 
+                ugv = _read_ugv_status()
                 status = {
                     "iphone": {
                         "connected": sensor_store.is_connected,
@@ -346,13 +457,22 @@ def run_http_status_server(port: int = HTTP_PORT):
                         "directive": qualia.directive,
                     },
                     "voice_state": "idle",
-                    "ugv": {"battery_v": 0.0, "moving": False},
+                    "ugv": {
+                        "battery_v": ugv.battery_v,
+                        "moving": ugv.moving,
+                        "wheel_speed_left": ugv.wheel_speed_left,
+                        "wheel_speed_right": ugv.wheel_speed_right,
+                        "heading_deg": ugv.heading_deg,
+                    },
                 }
 
                 body = json.dumps(status).encode()
+                origin = self.headers.get("Origin", "")
+                allowed = _cors_origin(origin)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
+                if allowed:
+                    self.send_header("Access-Control-Allow-Origin", allowed)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -361,8 +481,11 @@ def run_http_status_server(port: int = HTTP_PORT):
                 self.end_headers()
 
         def do_OPTIONS(self):
+            origin = self.headers.get("Origin", "")
+            allowed = _cors_origin(origin)
             self.send_response(200)
-            self.send_header("Access-Control-Allow-Origin", "*")
+            if allowed:
+                self.send_header("Access-Control-Allow-Origin", allowed)
             self.send_header("Access-Control-Allow-Methods", "GET")
             self.end_headers()
 

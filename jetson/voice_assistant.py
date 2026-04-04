@@ -7,7 +7,7 @@ Wake word → STT → LLM (with tools) → Streaming TTS → Speaker
 
 Components:
   - openWakeWord: wake word detection ("hey jarvis")
-  - whisper.cpp:  speech-to-text (tiny.en, ~75MB)
+  - whisper.cpp:  speech-to-text (distil-small.en preferred, tiny.en fallback)
   - Ollama:       LLM inference (gemma3:1b) with dispatch-based tool calling
   - Piper TTS:    text-to-speech (lessac-medium) with sentence streaming
 
@@ -45,7 +45,8 @@ import numpy as np
 # ─── Configuration ───────────────────────────────────────────────
 
 WHISPER_CLI = os.path.expanduser("~/whisper.cpp/build/bin/whisper-cli")
-WHISPER_MODEL = os.path.expanduser("~/whisper.cpp/models/ggml-tiny.en.bin")
+WHISPER_MODEL = os.path.expanduser("~/whisper.cpp/models/ggml-distil-small.en.bin")
+WHISPER_MODEL_FALLBACK = os.path.expanduser("~/whisper.cpp/models/ggml-tiny.en.bin")
 PIPER_CLI = os.path.expanduser("~/.local/bin/piper")
 PIPER_VOICE = os.path.expanduser("~/piper-voices/en_US-lessac-medium.onnx")
 OLLAMA_URL = "http://localhost:11434"
@@ -82,8 +83,8 @@ MIN_RECORD_SECONDS = 0.5  # min recording to process
 WAKE_WORD_MODEL = "hey_jarvis"  # Pre-trained model
 WAKE_THRESHOLD = 0.5  # Detection confidence threshold
 
-# LLM system prompt
-SYSTEM_PROMPT = (
+# LLM system prompt (base — LORE context appended at runtime)
+SYSTEM_PROMPT_BASE = (
     "You are a helpful voice assistant running locally on a Jetson Orin Nano "
     "mounted on a Waveshare UGV robot. "
     "Keep responses concise — 1-3 sentences max. Be direct and conversational. "
@@ -98,6 +99,27 @@ SYSTEM_PROMPT = (
     "learns to predict and understand the environment. You can check what your "
     "brain is thinking, which layers are surprised, and set high-level directives."
 )
+
+
+def _build_system_prompt() -> str:
+    """Build system prompt with LORE context injected at the base level.
+
+    The LLM is always aware of what the Qualia brain has learned,
+    enabling conversations like 'you learned there's a hallway — explore it'.
+    """
+    prompt = SYSTEM_PROMPT_BASE
+    try:
+        from lore_store import LoreStore
+        store = LoreStore()
+        lore_context = store.get_for_llm_context(limit=5)
+        if lore_context:
+            prompt += (
+                "\n\nBelow is what your Qualia brain has learned recently. "
+                "You can reference this knowledge in conversation:\n" + lore_context
+            )
+    except Exception:
+        pass
+    return prompt
 
 # UGV serial port
 UGV_PORT = "/dev/ttyTHS1"
@@ -417,39 +439,39 @@ def tool_system_telemetry():
 # ─── UGV Tool Functions ─────────────────────────────────────────
 
 
-def tool_ugv_forward(duration="1.0", speed="100"):
+def tool_ugv_forward(duration="1.0", speed="0.2"):
     """Move the robot forward."""
     ugv = _get_ugv()
     if not ugv:
         return "Robot not connected"
-    ugv.forward(speed=int(speed), duration=float(duration))
+    ugv.forward(speed=float(speed), duration=float(duration))
     return f"Moved forward for {duration}s"
 
 
-def tool_ugv_backward(duration="1.0", speed="100"):
+def tool_ugv_backward(duration="1.0", speed="0.2"):
     """Move the robot backward."""
     ugv = _get_ugv()
     if not ugv:
         return "Robot not connected"
-    ugv.backward(speed=int(speed), duration=float(duration))
+    ugv.backward(speed=float(speed), duration=float(duration))
     return f"Moved backward for {duration}s"
 
 
-def tool_ugv_turn_left(duration="0.5", speed="80"):
+def tool_ugv_turn_left(duration="0.5", speed="0.15"):
     """Turn the robot left."""
     ugv = _get_ugv()
     if not ugv:
         return "Robot not connected"
-    ugv.turn_left(speed=int(speed), duration=float(duration))
+    ugv.turn_left(speed=float(speed), duration=float(duration))
     return "Turned left"
 
 
-def tool_ugv_turn_right(duration="0.5", speed="80"):
+def tool_ugv_turn_right(duration="0.5", speed="0.15"):
     """Turn the robot right."""
     ugv = _get_ugv()
     if not ugv:
         return "Robot not connected"
-    ugv.turn_right(speed=int(speed), duration=float(duration))
+    ugv.turn_right(speed=float(speed), duration=float(duration))
     return "Turned right"
 
 
@@ -564,6 +586,46 @@ TOOL_REGISTRY = {
 }
 
 
+import re as _re
+
+
+def _validate_duration(value) -> bool:
+    """Duration must be a non-negative number capped at 30 seconds."""
+    try:
+        return 0 <= float(value) <= 30
+    except (TypeError, ValueError):
+        return False
+
+
+def _validate_qualia_text(value) -> bool:
+    """Strip control characters and enforce max 500 chars."""
+    return isinstance(value, str) and len(_re.sub(r'[\x00-\x1f\x7f]', '', value)) <= 500
+
+
+# Maps tool name → param name → validation function.
+# Only parameters that need security constraints are listed here.
+TOOL_PARAM_VALIDATORS = {
+    "restart_service": {
+        "service_name": lambda v: v in ALLOWED_RESTART_SERVICES,
+    },
+    "move_forward": {
+        "duration": _validate_duration,
+    },
+    "move_backward": {
+        "duration": _validate_duration,
+    },
+    "turn_left": {
+        "duration": _validate_duration,
+    },
+    "turn_right": {
+        "duration": _validate_duration,
+    },
+    "qualia_directive": {
+        "text": _validate_qualia_text,
+    },
+}
+
+
 def execute_tool(name, arguments):
     if name not in TOOL_REGISTRY:
         return f"Unknown tool: {name}"
@@ -571,6 +633,11 @@ def execute_tool(name, arguments):
     try:
         if param_names:
             kwargs = {k: arguments.get(k, "") for k in param_names}
+            # Apply validators before executing
+            validators = TOOL_PARAM_VALIDATORS.get(name, {})
+            for param, validator in validators.items():
+                if param in kwargs and not validator(kwargs[param]):
+                    return f"Invalid parameter: {param}"
             return func(**kwargs)
         return func()
     except Exception as e:
@@ -1064,15 +1131,20 @@ def transcribe(wav_path):
     if not os.path.exists(WHISPER_CLI):
         log.error(f"whisper-cli not found at {WHISPER_CLI}")
         return ""
-    if not os.path.exists(WHISPER_MODEL):
-        log.error(f"Whisper model not found at {WHISPER_MODEL}")
+    # Prefer distil-small.en, fall back to tiny.en
+    model_path = WHISPER_MODEL
+    if not os.path.exists(model_path):
+        log.warning("Distil-small model not found, falling back to tiny.en")
+        model_path = WHISPER_MODEL_FALLBACK
+    if not os.path.exists(model_path):
+        log.error(f"No whisper model found at {WHISPER_MODEL} or {WHISPER_MODEL_FALLBACK}")
         return ""
 
     try:
         result = subprocess.run(
             [
                 WHISPER_CLI,
-                "-m", WHISPER_MODEL,
+                "-m", model_path,
                 "-f", wav_path,
                 "--no-timestamps",
                 "--no-prints",
@@ -1107,6 +1179,71 @@ _tools_enabled = False  # Dispatch handles all tools; avoids 400 error + retry o
 # Model swap lock — only one model in VRAM at a time
 _model_lock = threading.Lock()
 
+# GPU lock coordination with YOLO (file-based flock)
+_gpu_lock = None
+_gpu_lock_path = "/tmp/qualia_model_lock"
+_last_ollama_call = 0.0
+OLLAMA_GPU_UNLOAD_TIMEOUT = 60  # seconds of silence before unloading Ollama from GPU
+
+
+def _acquire_gpu_lock(timeout: float = 10.0) -> bool:
+    """Acquire the shared GPU lock (same lock YOLO uses)."""
+    global _gpu_lock
+    try:
+        import fcntl
+        if _gpu_lock is None:
+            _gpu_lock = open(_gpu_lock_path, "w")
+        start = time.monotonic()
+        while time.monotonic() - start < timeout:
+            try:
+                fcntl.flock(_gpu_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                _gpu_lock.write(f"ollama:{os.getpid()}\n")
+                _gpu_lock.flush()
+                return True
+            except (IOError, OSError):
+                time.sleep(0.5)
+        log.warning("GPU lock acquisition timed out after %.0fs", timeout)
+        return False
+    except Exception as e:
+        log.debug("GPU lock error (non-fatal): %s", e)
+        return True  # Don't block if locking unavailable
+
+
+def _release_gpu_lock():
+    """Release the shared GPU lock so YOLO can use the GPU."""
+    global _gpu_lock
+    if _gpu_lock is not None:
+        try:
+            import fcntl
+            fcntl.flock(_gpu_lock, fcntl.LOCK_UN)
+        except (IOError, OSError):
+            pass
+
+
+def _unload_ollama_model():
+    """Tell Ollama to unload the model from GPU, freeing VRAM for YOLO."""
+    try:
+        body = json.dumps({"model": OLLAMA_MODEL, "keep_alive": 0}).encode()
+        req = Request(
+            f"{OLLAMA_URL}/api/generate",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urlopen(req, timeout=5)
+        log.info("Unloaded Ollama model from GPU (freeing VRAM for YOLO)")
+    except Exception as e:
+        log.debug("Ollama unload failed (non-fatal): %s", e)
+
+
+def _check_ollama_idle_unload():
+    """If Ollama hasn't been called for OLLAMA_GPU_UNLOAD_TIMEOUT, unload it."""
+    global _last_ollama_call
+    if _last_ollama_call > 0 and (time.time() - _last_ollama_call) > OLLAMA_GPU_UNLOAD_TIMEOUT:
+        _unload_ollama_model()
+        _release_gpu_lock()
+        _last_ollama_call = 0.0
+
 
 def _stream_ollama(messages, sentence_cb=None, use_tools=False, model=None, options=None):
     """Stream an Ollama chat response, emitting complete sentences for TTS.
@@ -1115,7 +1252,14 @@ def _stream_ollama(messages, sentence_cb=None, use_tools=False, model=None, opti
     Reads NDJSON line-by-line from the streaming HTTP response.
     model: override the default OLLAMA_MODEL (used for vision/reasoning).
     options: override default Ollama options (num_predict, temperature, etc.).
+
+    GPU lock coordination: acquires the shared GPU lock before calling Ollama,
+    releases after response. YOLO suspends while Ollama has the lock.
     """
+    global _last_ollama_call
+    _acquire_gpu_lock(timeout=10.0)
+    _last_ollama_call = time.time()
+
     active_model = model or OLLAMA_MODEL
     default_options = {"num_predict": 256, "temperature": 0.7}
     if options:
@@ -1197,15 +1341,18 @@ def _stream_ollama(messages, sentence_cb=None, use_tools=False, model=None, opti
         if sentence_cb and sentence_buf.strip():
             sentence_cb(sentence_buf.strip())
 
+        _release_gpu_lock()
         return full_text, tool_calls
 
     except URLError as e:
+        _release_gpu_lock()
         log.error(f"Ollama connection error: {e}")
         err = "Sorry, I can't reach the language model right now."
         if sentence_cb:
             sentence_cb(err)
         return err, None
     except Exception as e:
+        _release_gpu_lock()
         log.error(f"Ollama error: {e}")
         err = "Sorry, something went wrong."
         if sentence_cb:
@@ -1234,19 +1381,11 @@ def query_ollama(prompt, sentence_cb=None):
     if len(conversation_history) > MAX_HISTORY * 2:
         conversation_history = conversation_history[-MAX_HISTORY * 2:]
 
-    # Enrich system prompt with LORE context if available
-    enriched_prompt = SYSTEM_PROMPT
-    try:
-        from lore_store import LoreStore
-        lore_store = LoreStore()
-        lore_context = lore_store.get_for_llm_context(limit=5)
-        if lore_context:
-            enriched_prompt += "\n\n" + lore_context
-    except Exception:
-        pass
+    # System prompt now includes LORE at the base level (1.3)
+    system_prompt = _build_system_prompt()
 
     messages = [
-        {"role": "system", "content": enriched_prompt},
+        {"role": "system", "content": system_prompt},
         *conversation_history,
     ]
 
@@ -1798,7 +1937,7 @@ def explore_autonomous(duration=30, sentence_cb=None):
                 sentence_cb(result)
             narration_parts.append(result)
             # Default: move forward briefly since no function was called
-            ugv.forward(speed=80, duration=0.8)
+            ugv.forward(speed=0.2, duration=0.8)
 
         time.sleep(0.5)  # Brief pause between iterations
 
@@ -1867,7 +2006,7 @@ def navigate_to(target, sentence_cb=None):
         elif isinstance(result, str):
             if sentence_cb:
                 sentence_cb(result)
-            ugv.forward(speed=60, duration=0.5)
+            ugv.forward(speed=0.15, duration=0.5)
 
         if stopped:
             msg = f"I think I found {target}!"
@@ -2223,7 +2362,8 @@ class VoiceAssistant:
         log.info(f"  Wake word: {WAKE_WORD_MODEL}")
         log.info(f"  Mic:       {MIC_DEVICE}")
         log.info(f"  Speaker:   {SPEAKER_DEVICE}")
-        log.info(f"  STT:       whisper.cpp tiny.en")
+        _stt_model = "distil-small.en" if os.path.exists(WHISPER_MODEL) else "tiny.en (fallback)"
+        log.info(f"  STT:       whisper.cpp {_stt_model}")
         log.info(f"  TTS:       Piper lessac-medium (streaming)")
         log.info(f"  Tools:     {'enabled' if _tools_enabled else 'disabled'}"
                  f" ({len(TOOL_REGISTRY)} functions)")
@@ -2249,6 +2389,8 @@ class VoiceAssistant:
                         self.process_conversation()
                         self.wakeword_model.reset()
                     else:
+                        # Check if Ollama should be unloaded to free GPU for YOLO
+                        _check_ollama_idle_unload()
                         time.sleep(0.5)
             except KeyboardInterrupt:
                 break
@@ -2264,8 +2406,8 @@ class VoiceAssistant:
 
         if not os.path.exists(WHISPER_CLI):
             issues.append(f"whisper-cli not found: {WHISPER_CLI}")
-        if not os.path.exists(WHISPER_MODEL):
-            issues.append(f"Whisper model not found: {WHISPER_MODEL}")
+        if not os.path.exists(WHISPER_MODEL) and not os.path.exists(WHISPER_MODEL_FALLBACK):
+            issues.append(f"No whisper model found: {WHISPER_MODEL} or {WHISPER_MODEL_FALLBACK}")
         if not os.path.exists(PIPER_VOICE):
             issues.append(f"Piper voice not found: {PIPER_VOICE}")
 
@@ -2515,16 +2657,16 @@ def main():
             log.error("  UGV not available — check serial connection")
             return
         log.info("  Forward 1s...")
-        ugv.forward(speed=80, duration=1.0)
+        ugv.forward(speed=0.2, duration=1.0)
         time.sleep(0.5)
         log.info("  Backward 1s...")
-        ugv.backward(speed=80, duration=1.0)
+        ugv.backward(speed=0.2, duration=1.0)
         time.sleep(0.5)
         log.info("  Turn left...")
-        ugv.turn_left(speed=80, duration=0.5)
+        ugv.turn_left(speed=0.15, duration=0.5)
         time.sleep(0.5)
         log.info("  Turn right...")
-        ugv.turn_right(speed=80, duration=0.5)
+        ugv.turn_right(speed=0.15, duration=0.5)
         time.sleep(0.5)
         log.info("  Stop.")
         ugv.stop()

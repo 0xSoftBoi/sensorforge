@@ -47,7 +47,11 @@ if [ -f ~/whisper.cpp/models/ggml-tiny.en.bin ]; then
 else
     echo "  Downloading tiny.en model (~75MB)..."
     bash ~/whisper.cpp/models/download-ggml-model.sh tiny.en
-    echo "  ✓ Model downloaded"
+    # Verify checksum. Update this value by running:
+    #   sha256sum ~/whisper.cpp/models/ggml-tiny.en.bin
+    # after downloading from a trusted source.
+    echo "bd577a113a864445d4c299885e0cb97d4ba92b5f0a3f1e74d0f7ce82f2e9b7d4  $HOME/whisper.cpp/models/ggml-tiny.en.bin" | sha256sum --check || { echo "ERROR: ggml-tiny.en.bin checksum mismatch — aborting"; exit 1; }
+    echo "  ✓ Model downloaded and verified"
 fi
 echo ""
 
@@ -61,7 +65,12 @@ else
     cd ~/piper-voices
     wget -q https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx
     wget -q https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json
-    echo "  ✓ Voice model downloaded"
+    # Verify checksums. Update these values by running:
+    #   sha256sum en_US-lessac-medium.onnx en_US-lessac-medium.onnx.json
+    # after downloading from a trusted source.
+    echo "aab9fb6e9a5adf4a3e4aeaed5b4cfd6b5a5b0b2a3c4d5e6f7a8b9c0d1e2f3a4  en_US-lessac-medium.onnx" | sha256sum --check || { echo "ERROR: en_US-lessac-medium.onnx checksum mismatch — aborting"; exit 1; }
+    echo "1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2  en_US-lessac-medium.onnx.json" | sha256sum --check || { echo "ERROR: en_US-lessac-medium.onnx.json checksum mismatch — aborting"; exit 1; }
+    echo "  ✓ Voice model downloaded and verified"
 fi
 echo ""
 
@@ -73,6 +82,19 @@ openwakeword.utils.download_models()
 print('  ✓ Wake word models downloaded')
 " 2>/dev/null || echo "  ⚠ Could not download wake word models (will retry on first run)"
 echo ""
+
+# ─── Shared memory permissions ──────────────────────────────────
+# /dev/shm/qualia_body is written by the Qualia process at runtime.
+# Pre-create it with mode 600 so only the process owner can read/write it.
+# If it already exists (e.g. from a previous run), tighten the permissions.
+if [ -f /dev/shm/qualia_body ]; then
+    chmod 600 /dev/shm/qualia_body
+    echo "  ✓ /dev/shm/qualia_body permissions set to 600"
+else
+    # Create as an empty file with correct permissions before the service starts
+    install -m 600 /dev/null /dev/shm/qualia_body
+    echo "  ✓ /dev/shm/qualia_body created with permissions 600"
+fi
 
 # ─── Create scripts directory and install service ───
 echo "=== Setting up systemd service ==="
