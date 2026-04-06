@@ -86,34 +86,46 @@ fn build_snapshot(shm: &ShmRegion, last_thought_seq: &mut u64, last_lore_seq: &m
         let weights = &slot.weights;
         let bias = &slot.bias;
 
-        // Weight stats
+        // Weight stats — Phase 8: O(n) off-diagonal norm (skip pair generation)
         let diag_mean: f64 = (0..STATE_DIM)
             .map(|d| weights[d * STATE_DIM + d] as f64)
             .sum::<f64>()
             / STATE_DIM as f64;
-        let off_diag_norm: f64 = (0..STATE_DIM)
-            .flat_map(|r| (0..STATE_DIM).map(move |c| (r, c)))
-            .filter(|(r, c)| r != c)
-            .map(|(r, c)| (weights[r * STATE_DIM + c] as f64).powi(2))
-            .sum::<f64>()
-            .sqrt();
+        let mut off_diag_sq: f64 = 0.0;
+        for r in 0..STATE_DIM {
+            for c in 0..STATE_DIM {
+                if r != c {
+                    let w = weights[r * STATE_DIM + c] as f64;
+                    off_diag_sq += w * w;
+                }
+            }
+        }
+        let off_diag_norm: f64 = off_diag_sq.sqrt();
         let bias_norm: f64 = bias
             .iter()
             .map(|b| (*b as f64) * (*b as f64))
             .sum::<f64>()
             .sqrt();
 
-        // Weight matrix — downsample to 16x16 for bandwidth
+        // Weight matrix — Phase 8: max-abs downsampling to 16x16.
+        // Uses the element with largest absolute value in each 4x4 block,
+        // preserving sign information and dynamic range that arithmetic
+        // mean would cancel out (e.g. +0.5 and -0.5 → 0 with mean).
         let mut weight_grid = [[0.0f32; 16]; 16];
         for r in 0..16 {
             for c in 0..16 {
-                let mut sum = 0.0f32;
+                let mut max_abs: f32 = 0.0;
+                let mut max_val: f32 = 0.0;
                 for dr in 0..4 {
                     for dc in 0..4 {
-                        sum += weights[(r * 4 + dr) * STATE_DIM + (c * 4 + dc)];
+                        let w = weights[(r * 4 + dr) * STATE_DIM + (c * 4 + dc)];
+                        if w.abs() > max_abs {
+                            max_abs = w.abs();
+                            max_val = w;
+                        }
                     }
                 }
-                weight_grid[r][c] = sum / 16.0;
+                weight_grid[r][c] = max_val;
             }
         }
 

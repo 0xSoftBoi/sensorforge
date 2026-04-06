@@ -103,6 +103,12 @@ struct App {
     thoughts: Vec<ThoughtDisplay>,
     children: Vec<(String, Child)>,
     has_gemini_key: bool,
+    // Phase 8: per-layer residual statistics for adaptive thresholds
+    residual_ema_mean: [f32; NUM_LAYERS],
+    residual_ema_std: [f32; NUM_LAYERS],
+    // Phase 8: VFE trend (exponential smoothing slope) for early warning
+    vfe_trend: [f64; NUM_LAYERS],
+    vfe_ema_smooth: [f64; NUM_LAYERS],
 }
 
 struct EventEntry {
@@ -165,6 +171,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         thoughts: Vec::with_capacity(MAX_DISPLAY_THOUGHTS),
         children,
         has_gemini_key: std::env::var("GEMINI_API_KEY").map(|k| !k.is_empty()).unwrap_or(false),
+        residual_ema_mean: [0.01; NUM_LAYERS],
+        residual_ema_std: [0.005; NUM_LAYERS],
+        vfe_trend: [0.0; NUM_LAYERS],
+        vfe_ema_smooth: [0.0; NUM_LAYERS],
     };
 
     // ── Main TUI loop ──
@@ -176,9 +186,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             app.belief_snapshots[i] = *reader.read();
         }
 
-        // Record VFE history
+        // Record VFE history + Phase 8: update per-layer residual stats and VFE trend
         for i in 0..NUM_LAYERS {
-            app.vfe_history[i][app.vfe_hist_idx] = app.belief_snapshots[i].vfe as f64;
+            let vfe = app.belief_snapshots[i].vfe as f64;
+            app.vfe_history[i][app.vfe_hist_idx] = vfe;
+
+            // Phase 8: EMA residual stats for adaptive thresholds (α=0.05)
+            let mean_res: f32 = app.belief_snapshots[i].residual.iter()
+                .map(|r| r.abs()).sum::<f32>() / STATE_DIM as f32;
+            let var_res: f32 = app.belief_snapshots[i].residual.iter()
+                .map(|r| (r.abs() - app.residual_ema_mean[i]).powi(2)).sum::<f32>() / STATE_DIM as f32;
+            app.residual_ema_mean[i] = app.residual_ema_mean[i] * 0.95 + mean_res * 0.05;
+            app.residual_ema_std[i] = app.residual_ema_std[i] * 0.95 + var_res.sqrt() * 0.05;
+
+            // Phase 8: VFE trend via double exponential smoothing (Holt's method)
+            let alpha_s = 0.3;
+            let prev_smooth = app.vfe_ema_smooth[i];
+            app.vfe_ema_smooth[i] = alpha_s * vfe + (1.0 - alpha_s) * (prev_smooth + app.vfe_trend[i]);
+            app.vfe_trend[i] = 0.1 * (app.vfe_ema_smooth[i] - prev_smooth) + 0.9 * app.vfe_trend[i];
         }
         app.vfe_hist_idx = (app.vfe_hist_idx + 1) % VFE_HISTORY_LEN;
 
@@ -697,16 +722,20 @@ fn render_detail(frame: &mut Frame, app: &App, area: Rect) {
     ];
     frame.render_widget(Paragraph::new(scalars), chunks[0]);
 
-    // Per-dimension table
+    // Per-dimension table — Phase 8: adaptive thresholds based on per-layer residual EMA
+    let res_mean = app.residual_ema_mean[app.selected_layer];
+    let res_std = app.residual_ema_std[app.selected_layer].max(0.0001);
     let mut lines = Vec::new();
     for d in 0..STATE_DIM {
         let res_val = belief.residual[d];
-        let res_style = if res_val.abs() < 0.001 {
-            Style::default().fg(Color::Green)
-        } else if res_val.abs() < 0.01 {
-            Style::default().fg(Color::Yellow)
+        // Z-score relative to this layer's recent residual distribution
+        let z = (res_val.abs() - res_mean) / res_std;
+        let res_style = if z < 1.0 {
+            Style::default().fg(Color::Green)    // within 1σ — normal
+        } else if z < 2.0 {
+            Style::default().fg(Color::Yellow)   // 1-2σ — notable
         } else {
-            Style::default().fg(Color::Red)
+            Style::default().fg(Color::Red)      // >2σ — anomalous
         };
 
         lines.push(Line::from(vec![
@@ -881,11 +910,15 @@ fn render_sparklines(frame: &mut Frame, app: &App, area: Rect) {
             data.push(app.vfe_history[layer][idx]);
         }
 
-        // Scale to u64 for sparkline (multiply by 10000 for precision)
-        let max_val = data.iter().cloned().fold(0.001_f64, f64::max);
+        // Phase 8: percentile-based sparkline scaling (p95) for outlier resistance.
+        // A single VFE spike no longer compresses the entire history into noise.
+        let mut sorted = data.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let p95_idx = (sorted.len() as f64 * 0.95) as usize;
+        let scale_val = sorted.get(p95_idx).copied().unwrap_or(0.001).max(0.001);
         let scaled: Vec<u64> = data
             .iter()
-            .map(|&v| ((v / max_val) * 100.0) as u64)
+            .map(|&v| ((v / scale_val).min(1.0) * 100.0) as u64)
             .collect();
 
         let color = match layer {
@@ -900,9 +933,11 @@ fn render_sparklines(frame: &mut Frame, app: &App, area: Rect) {
         };
 
         let belief = &app.belief_snapshots[layer];
+        let trend = app.vfe_trend[layer];
+        let trend_ch = if trend > 0.01 { "↑" } else if trend < -0.01 { "↓" } else { "→" };
         let label = format!(
-            " L{} {} — VFE: {:.4} — max: {:.4} ",
-            layer, LAYER_NAMES[layer], belief.vfe, max_val,
+            " L{} {} — VFE: {:.4} — p95: {:.4} {} ",
+            layer, LAYER_NAMES[layer], belief.vfe, scale_val, trend_ch,
         );
 
         let sparkline = Sparkline::default()
@@ -940,20 +975,20 @@ fn render_residuals(frame: &mut Frame, app: &App, area: Rect) {
         ])
         .split(inner);
 
-    // Legend
+    // Phase 8: adaptive legend using z-score thresholds (per-layer σ)
     let legend = Line::from(vec![
         Span::raw("  "),
         Span::styled("·", Style::default().fg(Color::DarkGray)),
-        Span::styled(" <0.001  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" <0.5σ  ", Style::default().fg(Color::DarkGray)),
         Span::styled("░", Style::default().fg(Color::Green)),
-        Span::styled(" <0.005  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" <1σ    ", Style::default().fg(Color::DarkGray)),
         Span::styled("▒", Style::default().fg(Color::Yellow)),
-        Span::styled(" <0.01   ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" <2σ    ", Style::default().fg(Color::DarkGray)),
         Span::styled("▓", Style::default().fg(Color::Red)),
-        Span::styled(" <0.05   ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" <3σ    ", Style::default().fg(Color::DarkGray)),
         Span::styled("█", Style::default().fg(Color::LightRed)),
-        Span::styled(" ≥0.05   ", Style::default().fg(Color::DarkGray)),
-        Span::raw("   (absolute residual per dimension)"),
+        Span::styled(" ≥3σ    ", Style::default().fg(Color::DarkGray)),
+        Span::raw("   (adaptive z-score per layer)  ↑↓→ VFE trend"),
     ]);
     frame.render_widget(Paragraph::new(vec![Line::from(""), legend]), chunks[0]);
 
@@ -979,27 +1014,39 @@ fn render_residuals(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(Color::White),
         )];
 
+        // Phase 8: adaptive heatmap thresholds using per-layer residual stats
+        let res_mean = app.residual_ema_mean[layer];
+        let res_std = app.residual_ema_std[layer].max(0.0001);
         for d in 0..STATE_DIM {
             let abs_res = belief.residual[d].abs();
-            let (ch, color) = if abs_res < 0.001 {
-                ('·', Color::DarkGray)
-            } else if abs_res < 0.005 {
-                ('░', Color::Green)
-            } else if abs_res < 0.01 {
-                ('▒', Color::Yellow)
-            } else if abs_res < 0.05 {
-                ('▓', Color::Red)
+            let z = (abs_res - res_mean) / res_std;
+            let (ch, color) = if z < 0.5 {
+                ('·', Color::DarkGray)   // well within normal
+            } else if z < 1.0 {
+                ('░', Color::Green)      // normal range
+            } else if z < 2.0 {
+                ('▒', Color::Yellow)     // notable
+            } else if z < 3.0 {
+                ('▓', Color::Red)        // anomalous
             } else {
-                ('█', Color::LightRed)
+                ('█', Color::LightRed)   // extreme outlier
             };
             spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
         }
 
-        // Append mean residual
+        // Append mean residual + Phase 8: VFE trend arrow for early warning
         let mean_res: f32 = belief.residual.iter().map(|r| r.abs()).sum::<f32>() / STATE_DIM as f32;
+        let trend = app.vfe_trend[layer];
+        let (trend_ch, trend_color) = if trend > 0.01 {
+            ("↑", Color::Red)         // VFE rising — learning pressure increasing
+        } else if trend < -0.01 {
+            ("↓", Color::Green)       // VFE falling — converging
+        } else {
+            ("→", Color::DarkGray)    // stable
+        };
         spans.push(Span::styled(
-            format!("  avg={:.4}", mean_res),
-            Style::default().fg(Color::DarkGray),
+            format!("  avg={:.4} {}", mean_res, trend_ch),
+            Style::default().fg(trend_color),
         ));
 
         lines.push(Line::from(spans));

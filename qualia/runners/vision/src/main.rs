@@ -182,6 +182,9 @@ fn run_vision_loop(shm: &ShmRegion, api_key: &str, interval_secs: u64, max_calls
     let mut last_llm = Instant::now() - Duration::from_secs(interval_secs + 1);
     let mut calls_made: u64 = 0;
     let mut budget_exhausted = false;
+    // Phase 8: adaptive embedding filter state
+    let mut prev_sensor = [0.0_f32; STATE_DIM];
+    let mut innovation_ema: f32 = 0.01;
     let mut last_detect_check = Instant::now();
 
     loop {
@@ -315,8 +318,8 @@ fn run_vision_loop(shm: &ShmRegion, api_key: &str, interval_secs: u64, max_calls
             }
         }
 
-        // Always update embedding from live sensor data
-        update_embedding_from_sensor(shm, world);
+        // Always update embedding from live sensor data (Phase 8: adaptive alpha)
+        update_embedding_from_sensor(shm, world, &mut prev_sensor, &mut innovation_ema);
 
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -450,6 +453,8 @@ struct GeminiUsage {
 }
 
 /// Harvest pending questions from all layer slots. Returns (layer, reason, question_text).
+/// Phase 8: questions are sorted by urgency — higher VFE layers and persistent-confusion
+/// (reason=0) rank first, so the most critical questions get Gemini's attention.
 fn harvest_questions(shm: &ShmRegion) -> Vec<(u8, u8, String)> {
     let mut questions = Vec::new();
     for i in 0..NUM_LAYERS {
@@ -457,13 +462,25 @@ fn harvest_questions(shm: &ShmRegion) -> Vec<(u8, u8, String)> {
         if slot.question.pending.load(Ordering::Acquire) {
             let text = read_cstr(&slot.question.text);
             if !text.is_empty() {
-                questions.push((slot.question.layer, slot.question.reason, text));
+                let vfe = slot.question.vfe;
+                let reason = slot.question.reason;
+                let layer = slot.question.layer;
+                // Urgency: higher VFE = more urgent, reason 0 (persistent confusion) = most urgent
+                let urgency = vfe * match reason {
+                    0 => 3.0,  // persistent high VFE — can't learn alone
+                    2 => 2.0,  // novel pattern spike
+                    1 => 1.5,  // compression plateau
+                    _ => 1.0,
+                };
+                questions.push((layer, reason, text, urgency));
             }
-            // Clear the pending flag
             slot.question.pending.store(false, Ordering::Release);
         }
     }
-    questions
+    // Sort by urgency descending — most critical questions first
+    questions.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
+    // Drop urgency from the output
+    questions.into_iter().map(|(l, r, t, _)| (l, r, t)).collect()
 }
 
 /// Call Gemini Vision to understand a camera frame.
@@ -719,16 +736,36 @@ fn generate_hash_embedding(world: &mut WorldModel, resp: &VisionResponse) {
 }
 
 /// Between Gemini calls, update the scene embedding with live sensor data.
-fn update_embedding_from_sensor(shm: &ShmRegion, world: &mut WorldModel) {
+/// Phase 8: adaptive alpha — when sensor data changes rapidly (high innovation),
+/// increase alpha to track faster; when stable, decrease to reduce noise.
+/// This is a simplified Kalman-inspired gain: alpha ∝ innovation / (innovation + noise).
+fn update_embedding_from_sensor(shm: &ShmRegion, world: &mut WorldModel,
+                                 prev_sensor: &mut [f32; STATE_DIM],
+                                 innovation_ema: &mut f32) {
     let slot = shm.layer_slot(NUM_LAYERS - 1); // sensor layer
     let reader = qualia_shm::LayerReader::new(slot);
     let sensor = reader.read();
 
-    // Blend sensor data into the scene embedding (low-pass filter)
-    let alpha = 0.05_f32;
+    // Compute innovation: how much did the sensor change since last read?
+    let mut innovation: f32 = 0.0;
     for i in 0..STATE_DIM {
-        let sensor_val = sensor.mean[i] * 2.0 - 1.0; // normalize to [-1, 1]
-        world.scene_embedding[i] = world.scene_embedding[i] * (1.0 - alpha) + sensor_val * alpha;
+        let sensor_val = sensor.mean[i] * 2.0 - 1.0;
+        let diff = sensor_val - prev_sensor[i];
+        innovation += diff * diff;
+        prev_sensor[i] = sensor_val;
+    }
+    innovation = innovation.sqrt() / STATE_DIM as f32;
+
+    // EMA of innovation for smooth adaptation
+    *innovation_ema = *innovation_ema * 0.9 + innovation * 0.1;
+
+    // Adaptive alpha: high innovation → alpha up to 0.3, low → down to 0.02
+    // Kalman-style gain: K = innovation / (innovation + measurement_noise)
+    let noise_floor = 0.005_f32;
+    let alpha = (*innovation_ema / (*innovation_ema + noise_floor)).clamp(0.02, 0.3);
+
+    for i in 0..STATE_DIM {
+        world.scene_embedding[i] = world.scene_embedding[i] * (1.0 - alpha) + prev_sensor[i] * alpha;
     }
 
     world.last_vision_ns = now_ns();
