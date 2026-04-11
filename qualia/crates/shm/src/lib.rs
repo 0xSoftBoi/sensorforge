@@ -71,6 +71,14 @@ pub const LORE_BUFFER_OFFSET: usize = THOUGHT_BUFFER_OFFSET + std::mem::size_of:
 /// ActionHistory lives after LoreBuffer (Phase 3.2).
 pub const ACTION_HISTORY_OFFSET: usize = LORE_BUFFER_OFFSET + std::mem::size_of::<LoreBuffer>();
 
+// ── Thought Theater layout ──────────────────────────────────────────
+pub const THEATER_OFFSET: usize = ACTION_HISTORY_OFFSET + std::mem::size_of::<ActionHistory>();
+pub const BIG_GRAPH_OFFSET: usize = THEATER_OFFSET + std::mem::size_of::<TheaterHeader>();
+pub const SMALL_GRAPH_OFFSET: usize = BIG_GRAPH_OFFSET + std::mem::size_of::<BigGraph>();
+pub const OP_SLICE_OFFSET: usize = SMALL_GRAPH_OFFSET + std::mem::size_of::<SmallGraph>();
+pub const PRESSURE_OFFSET: usize = OP_SLICE_OFFSET + std::mem::size_of::<OperationalSlice>();
+pub const TRIM_MASK_OFFSET: usize = PRESSURE_OFFSET + std::mem::size_of::<PressureBuffer>();
+
 // ---------------------------------------------------------------------------
 // ShmRegion
 // ---------------------------------------------------------------------------
@@ -361,6 +369,85 @@ impl ShmRegion {
         }
     }
 
+    // ── Thought Theater accessors ────────────────────────────────────
+
+    pub fn theater_header(&self) -> &TheaterHeader {
+        unsafe {
+            let ptr = self.ptr.add(THEATER_OFFSET);
+            &*(ptr as *const TheaterHeader)
+        }
+    }
+
+    pub fn big_graph(&self) -> &BigGraph {
+        unsafe {
+            let ptr = self.ptr.add(BIG_GRAPH_OFFSET);
+            &*(ptr as *const BigGraph)
+        }
+    }
+
+    pub fn big_graph_mut(&self) -> &mut BigGraph {
+        unsafe {
+            let ptr = self.ptr.add(BIG_GRAPH_OFFSET);
+            &mut *(ptr as *mut BigGraph)
+        }
+    }
+
+    pub fn small_graph(&self) -> &SmallGraph {
+        unsafe {
+            let ptr = self.ptr.add(SMALL_GRAPH_OFFSET);
+            &*(ptr as *const SmallGraph)
+        }
+    }
+
+    pub fn small_graph_mut(&self) -> &mut SmallGraph {
+        unsafe {
+            let ptr = self.ptr.add(SMALL_GRAPH_OFFSET);
+            &mut *(ptr as *mut SmallGraph)
+        }
+    }
+
+    pub fn operational_slice(&self) -> &OperationalSlice {
+        unsafe {
+            let ptr = self.ptr.add(OP_SLICE_OFFSET);
+            &*(ptr as *const OperationalSlice)
+        }
+    }
+
+    pub fn operational_slice_mut(&self) -> &mut OperationalSlice {
+        unsafe {
+            let ptr = self.ptr.add(OP_SLICE_OFFSET);
+            &mut *(ptr as *mut OperationalSlice)
+        }
+    }
+
+    pub fn pressure_buffer(&self) -> &PressureBuffer {
+        unsafe {
+            let ptr = self.ptr.add(PRESSURE_OFFSET);
+            &*(ptr as *const PressureBuffer)
+        }
+    }
+
+    pub fn pressure_buffer_mut(&self) -> &mut PressureBuffer {
+        unsafe {
+            let ptr = self.ptr.add(PRESSURE_OFFSET);
+            &mut *(ptr as *mut PressureBuffer)
+        }
+    }
+
+    pub fn trim_mask(&self) -> &TrimMask {
+        unsafe {
+            let ptr = self.ptr.add(TRIM_MASK_OFFSET);
+            &*(ptr as *const TrimMask)
+        }
+    }
+
+    pub fn trim_mask_mut(&self) -> &mut TrimMask {
+        unsafe {
+            let ptr = self.ptr.add(TRIM_MASK_OFFSET);
+            &mut *(ptr as *mut TrimMask)
+        }
+    }
+
     /// Append an action entry to the ring buffer (lock-free).
     pub fn emit_action(&self, entry: &ActionEntry) {
         let ah = self.action_history_mut();
@@ -485,6 +572,13 @@ mod tests {
         assert!(THOUGHT_BUFFER_OFFSET + mem::size_of::<ThoughtBuffer>() <= SHM_SIZE);
         assert!(LORE_BUFFER_OFFSET + mem::size_of::<LoreBuffer>() <= SHM_SIZE);
         assert!(ACTION_HISTORY_OFFSET + mem::size_of::<ActionHistory>() <= SHM_SIZE);
+        // Thought Theater
+        assert!(THEATER_OFFSET + mem::size_of::<TheaterHeader>() <= SHM_SIZE);
+        assert!(BIG_GRAPH_OFFSET + mem::size_of::<BigGraph>() <= SHM_SIZE);
+        assert!(SMALL_GRAPH_OFFSET + mem::size_of::<SmallGraph>() <= SHM_SIZE);
+        assert!(OP_SLICE_OFFSET + mem::size_of::<OperationalSlice>() <= SHM_SIZE);
+        assert!(PRESSURE_OFFSET + mem::size_of::<PressureBuffer>() <= SHM_SIZE);
+        assert!(TRIM_MASK_OFFSET + mem::size_of::<TrimMask>() <= SHM_SIZE);
     }
 
     #[test]

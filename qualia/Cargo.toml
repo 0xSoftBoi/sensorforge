@@ -19,6 +19,7 @@ members = [
     "runners/watch",
     "runners/camera",
     "runners/vision",
+    "runners/coach",
 ]
 
 # Exclude crates/cuda from default builds (requires CUDA toolkit).
@@ -41,6 +42,7 @@ default-members = [
     "runners/watch",
     "runners/camera",
     "runners/vision",
+    "runners/coach",
 ]
 
 [workspace.package]

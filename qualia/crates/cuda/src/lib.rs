@@ -254,6 +254,130 @@ impl CudaContext {
     }
 }
 
+// ── Thought Theater: Factor Pressure GPU context ────────────────────
+
+const PRESSURE_KERNEL_SRC: &str = include_str!("../../../kernels/factor_pressure.cu");
+
+pub struct TheaterCudaContext {
+    device: Arc<CudaDevice>,
+    params_dev: CudaSlice<f32>,
+}
+
+impl TheaterCudaContext {
+    pub fn new(age_decay: f32, support_weight: f32, contradict_weight: f32) -> Result<Self, String> {
+        let device = CudaDevice::new(0).map_err(|e| format!("CUDA device init failed: {e}"))?;
+
+        let ptx = compile_pressure_kernel(&device)?;
+        device
+            .load_ptx(ptx, "pressure", &["factor_pressure"])
+            .map_err(|e| format!("PTX load (pressure) failed: {e}"))?;
+
+        let params_data: [f32; 3] = [age_decay, support_weight, contradict_weight];
+        let params_dev = device
+            .htod_copy(params_data.to_vec())
+            .map_err(|e| format!("params copy failed: {e}"))?;
+
+        Ok(Self { device, params_dev })
+    }
+
+    pub fn dispatch_factor_pressure(
+        &self,
+        nodes: &mut [GraphNode],
+        edges: &mut [GraphEdge],
+        energies: &mut [f32],
+        node_count: u32,
+        edge_count: u32,
+    ) {
+        let node_bytes = unsafe {
+            std::slice::from_raw_parts(
+                nodes.as_ptr() as *const u8,
+                nodes.len() * std::mem::size_of::<GraphNode>(),
+            )
+        };
+        let edge_bytes = unsafe {
+            std::slice::from_raw_parts(
+                edges.as_ptr() as *const u8,
+                edges.len() * std::mem::size_of::<GraphEdge>(),
+            )
+        };
+
+        let nodes_dev = self.device.htod_copy(node_bytes.to_vec()).expect("nodes htod");
+        let edges_dev = self.device.htod_copy(edge_bytes.to_vec()).expect("edges htod");
+        let energies_dev = self
+            .device
+            .htod_copy(energies.to_vec())
+            .expect("energies htod");
+
+        let kernel = self
+            .device
+            .get_func("pressure", "factor_pressure")
+            .expect("factor_pressure kernel not found");
+
+        let cfg = LaunchConfig {
+            grid_dim: (1, 1, 1),
+            block_dim: (64, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        unsafe {
+            kernel
+                .launch(
+                    cfg,
+                    (
+                        &nodes_dev,
+                        &edges_dev,
+                        &energies_dev,
+                        &self.params_dev,
+                        node_count,
+                        edge_count,
+                    ),
+                )
+                .expect("factor_pressure launch failed");
+        }
+
+        // Copy results back
+        let nodes_result = self.device.dtoh_sync_copy(&nodes_dev).expect("nodes dtoh");
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                nodes_result.as_ptr(),
+                nodes.as_mut_ptr() as *mut u8,
+                nodes.len() * std::mem::size_of::<GraphNode>(),
+            );
+        }
+
+        let edges_result = self.device.dtoh_sync_copy(&edges_dev).expect("edges dtoh");
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                edges_result.as_ptr(),
+                edges.as_mut_ptr() as *mut u8,
+                edges.len() * std::mem::size_of::<GraphEdge>(),
+            );
+        }
+
+        let energies_result = self
+            .device
+            .dtoh_sync_copy(&energies_dev)
+            .expect("energies dtoh");
+        energies[..energies_result.len()].copy_from_slice(&energies_result);
+    }
+}
+
+fn compile_pressure_kernel(device: &Arc<CudaDevice>) -> Result<cudarc::nvrtc::Ptx, String> {
+    let (major, minor) = detect_gpu_arch(device);
+    let arch = format!("compute_{}{}", major, minor);
+
+    let opts = cudarc::nvrtc::CompileOptions {
+        arch: Some(Box::leak(arch.into_boxed_str())),
+        ..Default::default()
+    };
+    let ptx = cudarc::nvrtc::compile_ptx_with_opts(PRESSURE_KERNEL_SRC, opts)
+        .map_err(|e| format!("NVRTC compile (pressure) failed: {e}"))?;
+
+    let ptx_src = ptx.to_src();
+    let patched = patch_ptx_version(&ptx_src);
+    Ok(cudarc::nvrtc::Ptx::from_src(patched))
+}
+
 pub fn default_params(layer_id: u8) -> LayerParams {
     match layer_id {
         0 => LayerParams {

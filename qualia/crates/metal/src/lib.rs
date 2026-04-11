@@ -149,6 +149,118 @@ impl MetalContext {
     }
 }
 
+// ── Thought Theater: Factor Pressure GPU context ────────────────────
+
+const PRESSURE_KERNEL_SRC: &str = include_str!("../../../kernels/factor_pressure.metal");
+
+pub struct TheaterMetalContext {
+    device: Device,
+    queue: CommandQueue,
+    pipeline: ComputePipelineState,
+    params_buf: Buffer,
+}
+
+impl TheaterMetalContext {
+    pub fn new(age_decay: f32, support_weight: f32, contradict_weight: f32) -> Result<Self, String> {
+        let device = Device::system_default().ok_or("No Metal device found")?;
+        let queue = device.new_command_queue();
+
+        let opts = CompileOptions::new();
+        let library = device
+            .new_library_with_source(PRESSURE_KERNEL_SRC, &opts)
+            .map_err(|e| format!("Metal compile error (pressure): {}", e))?;
+
+        let function = library
+            .get_function("factor_pressure", None)
+            .map_err(|e| format!("Kernel 'factor_pressure' not found: {}", e))?;
+
+        let pipeline = device
+            .new_compute_pipeline_state_with_function(&function)
+            .map_err(|e| format!("Pipeline error (pressure): {}", e))?;
+
+        let params_data: [f32; 3] = [age_decay, support_weight, contradict_weight];
+        let params_buf = device.new_buffer_with_data(
+            params_data.as_ptr() as *const _,
+            (3 * std::mem::size_of::<f32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        Ok(Self { device, queue, pipeline, params_buf })
+    }
+
+    pub fn dispatch_factor_pressure(
+        &self,
+        nodes: &mut [GraphNode],
+        edges: &mut [GraphEdge],
+        energies: &mut [f32],
+        node_count: u32,
+        edge_count: u32,
+    ) {
+        let node_size = (nodes.len() * std::mem::size_of::<GraphNode>()) as u64;
+        let edge_size = (edges.len() * std::mem::size_of::<GraphEdge>()) as u64;
+        let energy_size = (energies.len() * std::mem::size_of::<f32>()) as u64;
+
+        let nodes_buf = self.device.new_buffer_with_data(
+            nodes.as_ptr() as *const _,
+            node_size,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let edges_buf = self.device.new_buffer_with_data(
+            edges.as_ptr() as *const _,
+            edge_size,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let energies_buf = self.device.new_buffer_with_data(
+            energies.as_ptr() as *const _,
+            energy_size,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        let counts: [u32; 2] = [node_count, edge_count];
+        let counts_buf = self.device.new_buffer_with_data(
+            counts.as_ptr() as *const _,
+            (2 * std::mem::size_of::<u32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        let cmd = self.queue.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+
+        enc.set_compute_pipeline_state(&self.pipeline);
+        enc.set_buffer(0, Some(&nodes_buf), 0);
+        enc.set_buffer(1, Some(&edges_buf), 0);
+        enc.set_buffer(2, Some(&energies_buf), 0);
+        enc.set_buffer(3, Some(&self.params_buf), 0);
+        enc.set_buffer(4, Some(&counts_buf), 0);
+
+        let grid_size = MTLSize::new(64, 1, 1);
+        let group_size = MTLSize::new(64, 1, 1);
+        enc.dispatch_threads(grid_size, group_size);
+
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                nodes_buf.contents() as *const GraphNode,
+                nodes.as_mut_ptr(),
+                nodes.len(),
+            );
+            std::ptr::copy_nonoverlapping(
+                edges_buf.contents() as *const GraphEdge,
+                edges.as_mut_ptr(),
+                edges.len(),
+            );
+            std::ptr::copy_nonoverlapping(
+                energies_buf.contents() as *const f32,
+                energies.as_mut_ptr(),
+                energies.len(),
+            );
+        }
+    }
+}
+
 pub fn default_params(layer_id: u8) -> LayerParams {
     match layer_id {
         0 => LayerParams { threshold: 0.1, learning_rate: 0.01, layer_id: 0, freq_hz: 1000.0, weight_decay: 0.0001, precision_eta: 0.01, surprise_threshold: 2.0, top_down_weight: 0.3 },

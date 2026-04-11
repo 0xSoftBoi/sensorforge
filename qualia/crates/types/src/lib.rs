@@ -200,6 +200,164 @@ pub struct LayerSlot {
     pub question: QuestionSlot,
 }
 
+// ── Thought Theater: Graph Types ────────────────────────────────────
+//
+// Big Graph (speculative proposals) → Factor Pressure (CUDA energy) →
+// Coach (trim/merge/promote) → Small Graph (trusted core) →
+// Operational Slice (planner compact state)
+
+pub const MAX_NODE_LABEL: usize = 32;
+pub const NODE_EMBED_DIM: usize = 16;
+pub const MAX_BIG_NODES: usize = 512;
+pub const MAX_BIG_EDGES: usize = 2048;
+pub const MAX_SMALL_NODES: usize = 128;
+pub const MAX_SMALL_EDGES: usize = 512;
+pub const MAX_HAZARDS: usize = 8;
+pub const MAX_GOAL_TEXT: usize = 64;
+
+pub const THEATER_MAGIC: u64 = 0x5448545230303031; // "THTR0001"
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodeKind {
+    Empty   = 0,
+    Region  = 1,
+    Object  = 2,
+    Factor  = 3,
+    Route   = 4,
+    WhatIf  = 5,
+    Path    = 6,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EdgeKind {
+    Empty       = 0,
+    Contains    = 1,
+    Supports    = 2,
+    Contradicts = 3,
+    LeadsTo     = 4,
+    Causes      = 5,
+    Alternative = 6,
+}
+
+/// A node in the proposal or accepted graph.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GraphNode {
+    pub kind: NodeKind,
+    /// bit 0: promoted, bit 1: merged, bit 2: trimmed
+    pub flags: u8,
+    pub id: u16,
+    pub parent_id: u16,         // 0xFFFF = no parent
+    pub edge_start: u16,        // index into edge array
+    pub edge_count: u16,
+    pub _pad0: [u8; 2],
+    pub label: [u8; MAX_NODE_LABEL],
+    pub position: [f32; 3],     // x, y, z spatial (normalised)
+    pub embedding: [f32; NODE_EMBED_DIM],
+    pub energy: f32,            // computed by factor-pressure kernel
+    pub confidence: f32,
+    pub timestamp_ns: u64,
+    pub source_layer: u8,
+    pub generation: u8,         // coach cycles survived
+    pub _pad1: [u8; 6],
+}
+
+/// An edge between two graph nodes.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GraphEdge {
+    pub from: u16,
+    pub to: u16,
+    pub kind: EdgeKind,
+    pub _pad: u8,
+    pub weight: f32,
+    pub tension: f32,           // computed by factor-pressure kernel
+}
+
+/// Fixed-capacity graph arena header (shared between BigGraph and SmallGraph).
+#[repr(C)]
+pub struct GraphArena {
+    pub node_count: u16,
+    pub edge_count: u16,
+    pub node_capacity: u16,
+    pub edge_capacity: u16,
+    pub generation: AtomicU64,
+    pub _pad: [u8; 48],
+}
+
+/// The Big Graph: speculative proposal space. 512 nodes, 2048 edges.
+#[repr(C)]
+pub struct BigGraph {
+    pub header: GraphArena,
+    pub nodes: [GraphNode; MAX_BIG_NODES],
+    pub edges: [GraphEdge; MAX_BIG_EDGES],
+}
+
+/// The Small Graph: accepted core / trusted structure. 128 nodes, 512 edges.
+#[repr(C)]
+pub struct SmallGraph {
+    pub header: GraphArena,
+    pub nodes: [GraphNode; MAX_SMALL_NODES],
+    pub edges: [GraphEdge; MAX_SMALL_EDGES],
+}
+
+/// A hazard detected in the scene.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Hazard {
+    /// 0=obstacle, 1=cliff, 2=moving_object, 3=unknown
+    pub kind: u8,
+    pub severity: u8,
+    pub _pad: [u8; 2],
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub radius: f32,
+}
+
+/// Operational Slice: the compact state the planner/motor system reads.
+/// Derived from the Small Graph by the coach runner.
+#[repr(C)]
+pub struct OperationalSlice {
+    pub pose: [f32; 6],            // x, y, z, roll, pitch, yaw
+    pub goal: [f32; 3],
+    pub goal_text: [u8; MAX_GOAL_TEXT],
+    pub hazard_count: u8,
+    pub _pad: [u8; 3],
+    pub hazards: [Hazard; MAX_HAZARDS],
+    pub confidence: f32,
+    pub update_seq: AtomicU64,
+    pub timestamp_ns: u64,
+}
+
+/// Theater header: top-level container in shared memory.
+#[repr(C)]
+pub struct TheaterHeader {
+    pub magic: u64,
+    pub big_graph_offset: u32,
+    pub small_graph_offset: u32,
+    pub op_slice_offset: u32,
+    pub pressure_offset: u32,
+    pub trim_mask_offset: u32,
+    pub _pad: [u8; 36],
+}
+
+/// Per-node energy values computed by the factor-pressure CUDA kernel.
+#[repr(C)]
+pub struct PressureBuffer {
+    pub energies: [f32; MAX_BIG_NODES],
+    pub update_seq: AtomicU64,
+}
+
+/// Bitmask: 1 = keep, 0 = trim. One bit per Big Graph node slot.
+#[repr(C)]
+pub struct TrimMask {
+    pub bits: [u8; MAX_BIG_NODES / 8],
+    pub update_seq: AtomicU64,
+}
+
 // ── Action History (Phase 3.2: sensorimotor contingencies) ──────────
 
 pub const MAX_ACTION_ENTRIES: usize = 256;
@@ -319,5 +477,60 @@ mod tests {
         let size = mem::size_of::<HealthReport>();
         assert!(size > 0);
         assert!(size <= 64);
+    }
+
+    #[test]
+    fn graph_node_size_is_stable() {
+        let size = mem::size_of::<GraphNode>();
+        assert_eq!(
+            size, 144,
+            "GraphNode size changed ({size}) — update CUDA kernel struct"
+        );
+    }
+
+    #[test]
+    fn graph_edge_size_is_stable() {
+        let size = mem::size_of::<GraphEdge>();
+        assert_eq!(
+            size, 16,
+            "GraphEdge size changed ({size}) — update CUDA kernel struct"
+        );
+    }
+
+    #[test]
+    fn graph_arena_header_is_64_bytes() {
+        assert_eq!(mem::size_of::<GraphArena>(), 64);
+    }
+
+    #[test]
+    fn theater_header_is_64_bytes() {
+        assert_eq!(mem::size_of::<TheaterHeader>(), 64);
+    }
+
+    #[test]
+    fn theater_fits_in_shm() {
+        // All theater structures must fit in the ~47 MiB of unused SHM space
+        let total = mem::size_of::<TheaterHeader>()
+            + mem::size_of::<BigGraph>()
+            + mem::size_of::<SmallGraph>()
+            + mem::size_of::<OperationalSlice>()
+            + mem::size_of::<PressureBuffer>()
+            + mem::size_of::<TrimMask>();
+        assert!(
+            total < 1024 * 1024,
+            "Theater structures too large: {total} bytes"
+        );
+    }
+
+    #[test]
+    fn node_kind_repr() {
+        assert_eq!(NodeKind::Empty as u8, 0);
+        assert_eq!(NodeKind::Path as u8, 6);
+    }
+
+    #[test]
+    fn edge_kind_repr() {
+        assert_eq!(EdgeKind::Empty as u8, 0);
+        assert_eq!(EdgeKind::Alternative as u8, 6);
     }
 }

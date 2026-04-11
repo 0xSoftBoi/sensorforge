@@ -237,6 +237,22 @@ fn build_snapshot(shm: &ShmRegion, last_thought_seq: &mut u64, last_lore_seq: &m
         *last_lore_seq = current_lore_seq;
     }
 
+    // Thought Theater
+    let bg = shm.big_graph();
+    let sg = shm.small_graph();
+    let ops = shm.operational_slice();
+    let theater = TheaterSnapshot {
+        big_graph_nodes: bg.header.node_count,
+        big_graph_edges: bg.header.edge_count,
+        small_graph_nodes: sg.header.node_count,
+        small_graph_edges: sg.header.edge_count,
+        coach_generation: sg.header.generation.load(Ordering::Relaxed),
+        op_slice_pose: ops.pose,
+        op_slice_goal: ops.goal,
+        op_slice_hazard_count: ops.hazard_count,
+        op_slice_confidence: ops.confidence,
+    };
+
     EngineSnapshot {
         layers,
         world: world_snapshot,
@@ -244,6 +260,7 @@ fn build_snapshot(shm: &ShmRegion, last_thought_seq: &mut u64, last_lore_seq: &m
         lore,
         lore_total: current_lore_seq,
         ledger_seq: shm.ledger_seq(),
+        theater,
     }
 }
 
@@ -276,6 +293,7 @@ struct EngineSnapshot {
     lore: Vec<LoreSnapshot>,
     lore_total: u64,
     ledger_seq: u64,
+    theater: TheaterSnapshot,
 }
 
 #[derive(Serialize)]
@@ -347,4 +365,17 @@ struct LoreSnapshot {
     effectiveness: f32,
     timestamp_ns: u64,
     seq: u64,
+}
+
+#[derive(Serialize)]
+struct TheaterSnapshot {
+    big_graph_nodes: u16,
+    big_graph_edges: u16,
+    small_graph_nodes: u16,
+    small_graph_edges: u16,
+    coach_generation: u64,
+    op_slice_pose: [f32; 6],
+    op_slice_goal: [f32; 3],
+    op_slice_hazard_count: u8,
+    op_slice_confidence: f32,
 }

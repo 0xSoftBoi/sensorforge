@@ -16,6 +16,7 @@ static RUNNER_NAMES: &[&str] = &[
     "qualia-l5-behavior",
     "qualia-health",
     "qualia-vision",
+    "qualia-coach",
 ];
 
 fn main() {

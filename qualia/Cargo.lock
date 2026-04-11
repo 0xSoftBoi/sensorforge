@@ -932,6 +932,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "qualia-coach"
+version = "0.1.0"
+dependencies = [
+ "qualia-cuda",
+ "qualia-metal",
+ "qualia-shm",
+ "qualia-types",
+ "signal-hook",
+]
+
+[[package]]
 name = "qualia-cuda"
 version = "0.1.0"
 dependencies = [
