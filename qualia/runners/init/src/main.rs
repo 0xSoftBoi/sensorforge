@@ -43,8 +43,8 @@ fn main() {
 
     // Catch SIGINT and SIGTERM for graceful shutdown
     unsafe {
-        libc::signal(libc::SIGINT, signal_handler as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, signal_handler as libc::sighandler_t);
+        libc::signal(libc::SIGINT, signal_handler as extern "C" fn(libc::c_int) as usize as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, signal_handler as extern "C" fn(libc::c_int) as usize as libc::sighandler_t);
     }
 
     let self_path = std::env::current_exe().expect("Cannot get self path");

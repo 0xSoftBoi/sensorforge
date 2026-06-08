@@ -54,8 +54,8 @@ Without `GEMINI_API_KEY` it runs in offline mode with synthetic sensor data and 
 ```mermaid
 graph TB
     subgraph "Gemini — The Semantic Layer"
-        GV[Gemini Vision<br/>gemini-2.0-flash]
-        GE[Gemini Embedding<br/>text-embedding-004]
+        GV[Gemini Vision<br/>gemini-2.5-flash]
+        GE[Gemini Embedding<br/>gemini-embedding-2-preview]
         GV -->|scene + lore answers| GE
         GE -->|64-dim embedding| WM[World Model<br/>shared memory]
     end
@@ -320,7 +320,7 @@ qualia/
     shm/         POSIX shared memory with double-buffering
     ipc/         Unix domain socket control plane
     metal/       Apple Silicon Metal GPU compute
-    cuda/        (stub) future NVIDIA support
+    cuda/        NVIDIA CUDA compute (NVRTC runtime) for Jetson
   runners/
     watch/       TUI supervisor — entry point, spawns everything
     camera/      Webcam via ffmpeg -> L6
