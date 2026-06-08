@@ -130,8 +130,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Catch SIGINT/SIGTERM
     unsafe {
-        libc::signal(libc::SIGINT, signal_handler as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, signal_handler as libc::sighandler_t);
+        libc::signal(libc::SIGINT, signal_handler as extern "C" fn(libc::c_int) as usize as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, signal_handler as extern "C" fn(libc::c_int) as usize as libc::sighandler_t);
     }
 
     let children = spawn_runners(&shm_name);

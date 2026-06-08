@@ -116,8 +116,8 @@ pub struct QuestionSlot {
 }
 
 /// Accumulated lore — an answered question that becomes part of the
-/// system's world-knowledge. Each entry is a question + Gemini's answer
-/// + the embedding shift it caused. LORE PERSISTS — it's the system's
+/// system's world-knowledge. Each entry pairs a question with Gemini's answer
+/// and the embedding shift it caused. LORE PERSISTS — it's the system's
 /// long-term semantic memory.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -305,6 +305,22 @@ mod tests {
         let size = mem::size_of::<BeliefSlot>();
         assert!(size % 64 == 0, "BeliefSlot size {size} not 64-byte aligned");
         assert_eq!(size, 1088, "BeliefSlot size changed — update CUDA kernel struct and Python bridge");
+    }
+
+    #[test]
+    fn belief_slot_field_offsets() {
+        // Field offsets the Metal/CUDA kernels and the Python bridge index into
+        // by hand. Size-stability alone won't catch a reorder that keeps the size;
+        // these lock the byte offsets of the layout the four languages share.
+        assert_eq!(mem::offset_of!(BeliefSlot, mean), 0);
+        assert_eq!(mem::offset_of!(BeliefSlot, precision), 256);
+        assert_eq!(mem::offset_of!(BeliefSlot, vfe), 512);
+        assert_eq!(mem::offset_of!(BeliefSlot, prediction), 516);
+        assert_eq!(mem::offset_of!(BeliefSlot, residual), 772);
+        assert_eq!(mem::offset_of!(BeliefSlot, challenge_vfe), 1028);
+        assert_eq!(mem::offset_of!(BeliefSlot, timestamp_ns), 1040);
+        assert_eq!(mem::offset_of!(BeliefSlot, vfe_ema), 1056);
+        assert_eq!(mem::offset_of!(BeliefSlot, compression_ratio), 1064);
     }
 
     #[test]

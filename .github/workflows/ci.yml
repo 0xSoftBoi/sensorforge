@@ -1,0 +1,48 @@
+name: qualia CI
+
+on:
+  push:
+    paths: ['qualia/**']
+  pull_request:
+    paths: ['qualia/**']
+
+defaults:
+  run:
+    working-directory: qualia
+
+jobs:
+  # macOS is the primary platform: the Metal GPU crate + all runners build here.
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: qualia
+      - name: Build (default = Metal)
+        run: cargo build --workspace
+      - name: Test
+        run: cargo test --workspace --lib
+      - name: Clippy
+        run: cargo clippy --workspace
+
+  # Linux can't build the Metal/CUDA crates (GPU SDKs), but the platform-independent
+  # core (data layout, shared-memory, IPC) — including the cross-language layout
+  # tripwires — must stay green everywhere.
+  linux-core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: qualia
+      - name: Test core crates
+        run: cargo test -p qualia-types -p qualia-shm -p qualia-ipc
+      - name: Clippy core crates
+        run: cargo clippy -p qualia-types -p qualia-shm -p qualia-ipc

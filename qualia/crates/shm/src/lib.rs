@@ -269,6 +269,10 @@ impl ShmRegion {
     }
 
     /// Mutable reference to the WorldModel. Only the vision runner should call this.
+    // clippy::mut_from_ref — sound under the single-writer invariant: exactly one
+    // process (the vision runner) writes the WorldModel region, so the `&mut`
+    // handed out from `&self` can never alias another mutable borrow.
+    #[allow(clippy::mut_from_ref)]
     pub fn world_model_mut(&self) -> &mut WorldModel {
         unsafe {
             let ptr = self.ptr.add(WORLD_MODEL_OFFSET);
@@ -354,6 +358,9 @@ impl ShmRegion {
     }
 
     /// Mutable reference to the ActionHistory. Only the explorer should call this.
+    // clippy::mut_from_ref — sound under the single-writer invariant: exactly one
+    // process (the explorer) writes the ActionHistory region.
+    #[allow(clippy::mut_from_ref)]
     pub fn action_history_mut(&self) -> &mut ActionHistory {
         unsafe {
             let ptr = self.ptr.add(ACTION_HISTORY_OFFSET);
@@ -425,6 +432,9 @@ impl<'a> LayerWriter<'a> {
 
     /// Returns a mutable reference to the **back buffer** (the one NOT being
     /// read by consumers). Writers fill this buffer, then call [`publish`].
+    // clippy::mut_from_ref — sound: one writer per layer, and the back buffer is
+    // never the buffer readers are reading (see SAFETY note in the body).
+    #[allow(clippy::mut_from_ref)]
     pub fn back_buffer(&self) -> &mut BeliefSlot {
         let write_idx = self.slot.write_idx.load(Ordering::Acquire) & 1;
         let back = 1 - write_idx;
