@@ -319,8 +319,53 @@ impl ShmRegion {
         }
     }
 
-    /// Append a lore entry to the ring buffer (lock-free).
-    pub fn emit_lore(&self, question: &str, answer: &str, layer: u8, reason: u8, embedding_delta: f32, effectiveness: f32) {
+    /// Lore feedback: fold any answers addressed to `layer_id` (since `*last_seq`)
+    /// into the layer's generative `bias`, so a settled answer reshapes what the
+    /// layer predicts next. The owning layer is the sole writer of its own `bias`,
+    /// so this preserves the single-writer discipline. Returns the number of
+    /// entries applied and advances `*last_seq`.
+    pub fn apply_lore_feedback(
+        &self,
+        layer_id: u8,
+        bias: &mut [f32; STATE_DIM],
+        last_seq: &mut u64,
+        lr: f32,
+    ) -> usize {
+        let lb = self.lore_buffer();
+        let write_seq = lb.write_seq.load(Ordering::Acquire);
+        if write_seq <= *last_seq {
+            return 0;
+        }
+        // Catch-up clamp: never look back further than the ring holds (mirrors the
+        // agent runner's scan).
+        let start = (*last_seq).max(write_seq.saturating_sub(MAX_LORE_ENTRIES as u64));
+        let mut applied = 0;
+        for seq in start..write_seq {
+            let entry = &lb.entries[(seq as usize) % MAX_LORE_ENTRIES];
+            // Ring-race guard: skip slots already overwritten by a newer entry.
+            if entry.seq == seq && entry.layer == layer_id {
+                apply_lore_nudge(bias, &entry.answer_embedding, lr);
+                applied += 1;
+            }
+        }
+        *last_seq = write_seq;
+        applied
+    }
+
+    /// Append a lore entry to the ring buffer (lock-free). `answer_embedding` is the
+    /// embedding of Gemini's answer — the asking layer later folds it into its `bias`
+    /// (see [`apply_lore_feedback`]). Pass zeros if no embedding is available.
+    #[allow(clippy::too_many_arguments)]
+    pub fn emit_lore(
+        &self,
+        question: &str,
+        answer: &str,
+        layer: u8,
+        reason: u8,
+        embedding_delta: f32,
+        effectiveness: f32,
+        answer_embedding: &[f32; STATE_DIM],
+    ) {
         let lb = unsafe {
             let ptr = self.ptr.add(LORE_BUFFER_OFFSET);
             &mut *(ptr as *mut LoreBuffer)
@@ -333,6 +378,7 @@ impl ShmRegion {
         entry.reason = reason;
         entry.embedding_delta = embedding_delta;
         entry.effectiveness = effectiveness;
+        entry.answer_embedding = *answer_embedding;
         entry.timestamp_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -528,6 +574,38 @@ mod tests {
 
         drop(region2);
         drop(region); // owner unlinks
+    }
+
+    #[test]
+    fn lore_feedback_nudges_bias() {
+        let name = format!("/qualia_lore_{}", std::process::id());
+        {
+            let c = CString::new(name.as_str()).unwrap();
+            unsafe { libc::shm_unlink(c.as_ptr()) };
+        }
+        let region = ShmRegion::create(&name).expect("create failed");
+
+        // An answer addressed to layer 3.
+        let mut emb = [0.0f32; STATE_DIM];
+        emb[0] = 1.0;
+        region.emit_lore("why?", "because", 3, 0, 0.0, 0.0, &emb);
+
+        // Layer 3 folds it into its bias; a settled answer shifts the baseline.
+        let mut bias = [0.0f32; STATE_DIM];
+        let mut seq3 = 0u64;
+        assert_eq!(region.apply_lore_feedback(3, &mut bias, &mut seq3, 0.3), 1);
+        assert!(bias[0] > 0.0, "bias moved toward the answer embedding");
+        assert_eq!(seq3, 1);
+        // Idempotent — no new entries means no further change.
+        assert_eq!(region.apply_lore_feedback(3, &mut bias, &mut seq3, 0.3), 0);
+
+        // A different layer ignores an answer addressed elsewhere.
+        let mut bias5 = [0.0f32; STATE_DIM];
+        let mut seq5 = 0u64;
+        assert_eq!(region.apply_lore_feedback(5, &mut bias5, &mut seq5, 0.3), 0);
+        assert_eq!(bias5[0], 0.0);
+
+        drop(region);
     }
 
     #[test]

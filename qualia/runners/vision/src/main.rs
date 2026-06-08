@@ -271,7 +271,10 @@ fn run_vision_loop(shm: &ShmRegion, api_key: &str, interval_secs: u64, max_calls
                                             .map(|d| (world.scene_embedding[d] - old_emb[d]).powi(2))
                                             .sum::<f32>()
                                             .sqrt();
-                                        shm.emit_lore(question, answer, *layer, *reason, emb_delta, 0.0);
+                                        // Embed the answer so the asking layer can fold it
+                                        // into its prior (Lore feedback).
+                                        let answer_emb = text_embedding(answer);
+                                        shm.emit_lore(question, answer, *layer, *reason, emb_delta, 0.0, &answer_emb);
                                         shm.emit_thought(255, 3, 0.0, &format!(
                                             "lore L{} r={}: Q={} A={}",
                                             layer, reason,
@@ -704,6 +707,21 @@ fn apply_vision_response(world: &mut WorldModel, resp: &VisionResponse) {
 }
 
 /// Fallback: hash-based embedding when Gemini embedding API fails.
+/// Deterministic content-derived embedding of a piece of text (same hash scheme
+/// as `generate_hash_embedding`, but pure). Used to give a Lore answer a stable
+/// vector the asking layer can nudge its `bias` toward.
+fn text_embedding(text: &str) -> [f32; STATE_DIM] {
+    let mut out = [0.0f32; STATE_DIM];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let mut val: f32 = 0.0;
+        for (j, ch) in text.bytes().enumerate() {
+            val += ((ch as f32) * ((i * 7 + j * 13) as f32).sin()) * 0.01;
+        }
+        *slot = val.tanh();
+    }
+    out
+}
+
 fn generate_hash_embedding(world: &mut WorldModel, resp: &VisionResponse) {
     let scene_full = format!("{} {}", resp.scene, resp.activity);
     for i in 0..STATE_DIM {

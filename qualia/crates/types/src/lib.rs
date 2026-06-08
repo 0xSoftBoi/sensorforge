@@ -137,6 +137,24 @@ pub struct LoreEntry {
     pub _pad: [u8; 2],
     pub timestamp_ns: u64,
     pub seq: u64,
+    /// Embedding of Gemini's answer (Lore feedback). The asking layer nudges its
+    /// generative `bias` toward this vector so a settled answer reshapes what the
+    /// layer predicts next. Zero until the vision runner populates it. Appended
+    /// last so existing field offsets (and the Python bridge reads) are unchanged.
+    pub answer_embedding: [f32; STATE_DIM],
+}
+
+/// Nudge a generative `bias` vector toward an answer embedding (Lore feedback).
+/// The move is bounded both per-step (±0.1) and absolutely (±10) so a returned
+/// answer can shift the layer's baseline expectation without destabilizing the
+/// belief dynamics. This is the mechanism by which "the answer reshapes what it
+/// expects next": `prediction = W·mean + bias`, so biasing `bias` toward the
+/// answered concept lowers future surprise for that pattern.
+pub fn apply_lore_nudge(bias: &mut [f32; STATE_DIM], emb: &[f32; STATE_DIM], lr: f32) {
+    for i in 0..STATE_DIM {
+        let step = (lr * (emb[i] - bias[i])).clamp(-0.1, 0.1);
+        bias[i] = (bias[i] + step).clamp(-10.0, 10.0);
+    }
 }
 
 /// Ring buffer of accumulated lore.
@@ -321,6 +339,37 @@ mod tests {
         assert_eq!(mem::offset_of!(BeliefSlot, timestamp_ns), 1040);
         assert_eq!(mem::offset_of!(BeliefSlot, vfe_ema), 1056);
         assert_eq!(mem::offset_of!(BeliefSlot, compression_ratio), 1064);
+    }
+
+    #[test]
+    fn lore_entry_size_is_stable() {
+        // question 256 + answer 512 + (layer/reason/2 deltas/2 pad) 12 + timestamp 8
+        // + seq 8 + answer_embedding 64*4=256  => 1056.
+        assert_eq!(
+            mem::size_of::<LoreEntry>(),
+            1056,
+            "LoreEntry size changed — update jetson/qualia_bridge.py LORE_ENTRY_SIZE (and any offset after LoreBuffer)"
+        );
+    }
+
+    #[test]
+    fn lore_nudge_moves_toward_embedding_and_is_bounded() {
+        let mut bias = [0.0f32; STATE_DIM];
+        let mut emb = [0.0f32; STATE_DIM];
+        emb[0] = 1.0;
+        emb[1] = -1.0;
+        emb[2] = 100.0; // far target — per-step clamp must cap the move
+        apply_lore_nudge(&mut bias, &emb, 0.3);
+        assert!(bias[0] > 0.0 && bias[0] <= 0.1); // moved toward +1, capped at +0.1
+        assert!(bias[1] < 0.0 && bias[1] >= -0.1); // moved toward -1
+        assert!(bias[2] <= 0.1); // per-step clamp holds even for a huge target
+                                  // Converges toward the target under repeated application, staying bounded.
+        for _ in 0..1000 {
+            apply_lore_nudge(&mut bias, &emb, 0.3);
+        }
+        assert!((bias[0] - 1.0).abs() < 1e-3);
+        assert!((bias[1] + 1.0).abs() < 1e-3);
+        assert!(bias[2] <= 10.0 && bias[2] >= 9.9); // absolute clamp at +10
     }
 
     #[test]

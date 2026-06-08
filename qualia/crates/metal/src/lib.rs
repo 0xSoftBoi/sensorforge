@@ -297,6 +297,9 @@ pub fn run_layer(layer_id: u8, name: &str) {
     let mut prev_streak: u32 = 0;
     let mut cycle_count: u64 = 0;
     let mut last_world_seq: u64 = 0;
+    // Lore feedback: start from the current write_seq so we don't replay answers
+    // accumulated before this layer started.
+    let mut last_lore_seq: u64 = shm.lore_buffer().write_seq.load(Ordering::Acquire);
     let mut high_vfe_streak: u32 = 0;        // consecutive high-VFE cycles
     let mut compression_stall_count: u32 = 0; // cycles at same compression
 
@@ -332,6 +335,23 @@ pub fn run_layer(layer_id: u8, name: &str) {
         let buf = writer.back_buffer();
         buf.layer = layer_id;
         metal.dispatch_belief_update(buf, &below, above_belief.as_ref(), weights, bias);
+
+        // ── Lore feedback ───────────────────────────────────────
+        // Fold any answers addressed to this layer into the persistent generative
+        // `bias`, so a settled answer reshapes what we predict next — and, once VFE
+        // drops below threshold, the question-gate stops re-firing ("won't be
+        // surprised the same way twice"). lr tracks the semantic-injection strength.
+        let lore_lr = if semantic_alpha > 0.0 { semantic_alpha } else { 0.1 };
+        let lore_applied = shm.apply_lore_feedback(layer_id, bias, &mut last_lore_seq, lore_lr);
+        if lore_applied > 0 && last_thought.elapsed() >= thought_cooldown {
+            shm.emit_thought(
+                layer_id,
+                THOUGHT_RESOLVE,
+                buf.vfe,
+                &format!("{desc}: folded {lore_applied} answer(s) into prior"),
+            );
+            last_thought = Instant::now();
+        }
 
         // ── Semantic injection ──────────────────────────────────
         // Blend the LLM's scene_embedding into this layer's beliefs.
