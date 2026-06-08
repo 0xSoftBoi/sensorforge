@@ -37,7 +37,9 @@ LORE_BUFFER_OFFSET = 17060624
 BELIEF_SLOT_SIZE = 1088
 WORLD_OBJECT_SIZE = 48
 THOUGHT_ENTRY_SIZE = 280
-LORE_ENTRY_SIZE = 800
+LORE_ENTRY_SIZE = 1056  # incl. answer_embedding[64] (Lore feedback); enforced by
+# the lore_entry_size_is_stable test in crates/types. ACTION_HISTORY_OFFSET is
+# computed from this below, so it tracks automatically.
 
 # Sub-struct counts
 MAX_OBJECTS = 16

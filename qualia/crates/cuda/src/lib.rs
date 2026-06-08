@@ -567,6 +567,9 @@ pub fn run_layer(layer_id: u8, name: &str) {
     let mut prev_streak: u32 = 0;
     let mut cycle_count: u64 = 0;
     let mut last_world_seq: u64 = 0;
+    // Lore feedback: start from the current write_seq so we don't replay answers
+    // accumulated before this layer started.
+    let mut last_lore_seq: u64 = shm.lore_buffer().write_seq.load(Ordering::Acquire);
     let mut high_vfe_streak: u32 = 0;
     let mut compression_stall_count: u32 = 0;
 
@@ -626,6 +629,21 @@ pub fn run_layer(layer_id: u8, name: &str) {
             weights,
             bias,
         );
+
+        // ── Lore feedback (identical to Metal backend) ──────────
+        // Fold answers addressed to this layer into the persistent generative
+        // `bias` so a settled answer reshapes what we predict next.
+        let lore_lr = if semantic_alpha > 0.0 { semantic_alpha } else { 0.1 };
+        let lore_applied = shm.apply_lore_feedback(layer_id, bias, &mut last_lore_seq, lore_lr);
+        if lore_applied > 0 && last_thought.elapsed() >= thought_cooldown {
+            shm.emit_thought(
+                layer_id,
+                THOUGHT_RESOLVE,
+                buf.vfe,
+                &format!("{desc}: folded {lore_applied} answer(s) into prior"),
+            );
+            last_thought = Instant::now();
+        }
 
         // Semantic injection (identical to Metal backend)
         if has_injection {
